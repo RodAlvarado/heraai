@@ -15,6 +15,9 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
   const isAnsweringRef = useRef(false);
+  const isCompletingRef = useRef(false);
+  const pendingCompletionArgsRef = useRef<any>(null);
+  const isTurnCompleteRef = useRef(false);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
@@ -176,17 +179,17 @@ export default function App() {
       const prompt = `Based on the following interview summary, generate a formal Candidate Evaluation Report in Markdown format.
       
       Role: ${selectedRole}
-      Score: ${args.recommended_score} / 75
-      Red Flags: ${args.red_flags}
+      Score: ${args?.recommended_score || 'N/A'} / 75
+      Red Flags: ${args?.red_flags || 'None'}
       
       Summary:
-      ${args.candidate_summary}
+      ${args?.candidate_summary || JSON.stringify(args) || 'No summary provided.'}
       
       Format the report exactly as follows:
       # Candidate Evaluation Report
       **Role Applied:** ${selectedRole}
       **Experience Level:** [Determine based on summary]
-      **Total Score:** ${args.recommended_score} / 75
+      **Total Score:** ${args?.recommended_score || 'N/A'} / 75
       
       ### Strengths
       - [List strengths]
@@ -195,14 +198,14 @@ export default function App() {
       - [List weaknesses]
       
       ### Red Flags
-      - ${args.red_flags} detected. [Brief explanation if any]
+      - ${args?.red_flags || 'None'} detected. [Brief explanation if any]
       
       ### Final Recommendation
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
+        model: 'gemini-3-flash-preview',
         contents: prompt
       });
       
@@ -220,6 +223,9 @@ export default function App() {
     setStep('interview');
     
     try {
+      isCompletingRef.current = false;
+      pendingCompletionArgsRef.current = null;
+      isTurnCompleteRef.current = false;
       audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       if (audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
@@ -279,18 +285,33 @@ export default function App() {
             if (message.serverContent?.interrupted) {
               stopAudio();
             }
+            if (message.serverContent?.turnComplete) {
+              isTurnCompleteRef.current = true;
+            }
             if (message.toolCall) {
               const call = message.toolCall.functionCalls?.find((c: any) => c.name === 'complete_interview');
               if (call) {
-                // Calculate how long until the current audio queue finishes
-                const currentTime = audioCtxRef.current?.currentTime || 0;
-                const delayMs = Math.max(0, nextPlayTimeRef.current - currentTime) * 1000;
-                
-                // Wait for the audio to finish before ending the interview
-                setTimeout(() => {
-                  handleInterviewComplete(call.args);
-                }, delayMs + 500); // Add 500ms buffer
+                pendingCompletionArgsRef.current = call.args;
               }
+            }
+            
+            // If we have received the tool call AND the turn is complete, wait for audio to finish
+            if (pendingCompletionArgsRef.current && isTurnCompleteRef.current && !isCompletingRef.current) {
+              isCompletingRef.current = true;
+              
+              // Recursively check if the audio queue has finished playing
+              const checkAudioFinished = () => {
+                const currentTime = audioCtxRef.current?.currentTime || 0;
+                // If current time has caught up to the latest queued audio time, we are done
+                if (currentTime >= nextPlayTimeRef.current) {
+                  handleInterviewComplete(pendingCompletionArgsRef.current);
+                } else {
+                  setTimeout(checkAudioFinished, 500);
+                }
+              };
+              
+              // Start checking
+              setTimeout(checkAudioFinished, 500);
             }
           },
           onclose: () => {
