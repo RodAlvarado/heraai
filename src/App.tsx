@@ -282,7 +282,14 @@ export default function App() {
             if (message.toolCall) {
               const call = message.toolCall.functionCalls?.find((c: any) => c.name === 'complete_interview');
               if (call) {
-                handleInterviewComplete(call.args);
+                // Calculate how long until the current audio queue finishes
+                const currentTime = audioCtxRef.current?.currentTime || 0;
+                const delayMs = Math.max(0, nextPlayTimeRef.current - currentTime) * 1000;
+                
+                // Wait for the audio to finish before ending the interview
+                setTimeout(() => {
+                  handleInterviewComplete(call.args);
+                }, delayMs + 500); // Add 500ms buffer
               }
             }
           },
