@@ -384,7 +384,6 @@ QUESTIONS LIST (Choose 3 randomly for the candidate's role):
 - How do you ensure CRM adoption by sales teams?
 
 COMPLETING THE INTERVIEW:
-When you have finished the 3 questions, you MUST call the \`complete_interview\` function.
+When you have finished the 3 questions, you MUST thank the candidate, say a brief goodbye, AND call the \`complete_interview\` function in the SAME response.
 Pass a detailed summary of the candidate's answers, strengths, weaknesses, and your recommended score (0-75).
-Do NOT say goodbye until you have called the function.
 `;
