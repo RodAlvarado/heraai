@@ -1,0 +1,5 @@
+{
+  "name": "AI Recruiter",
+  "description": "An AI-powered HR Recruiter specialized in screening remote LATAM talent for U.S. companies.",
+  "requestFramePermissions": ["microphone"]
+}
