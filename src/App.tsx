@@ -14,8 +14,11 @@ import { InterviewHistory } from './components/InterviewHistory';
 import { db } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
 
-// Initialize Gemini SDK
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Lazy getter for Gemini SDK to prevent startup crash if API key is missing
+function getGeminiClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+  return new GoogleGenAI({ apiKey: apiKey || 'dummy-key-placeholder' });
+}
 
 function MainApp() {
   const { user, profile, logout } = useAuth();
@@ -220,7 +223,7 @@ function MainApp() {
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
-      const response = await ai.models.generateContent({
+      const response = await getGeminiClient().models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt
       });
@@ -285,7 +288,7 @@ function MainApp() {
       }
       nextPlayTimeRef.current = audioCtxRef.current.currentTime;
       
-      const sessionPromise = ai.live.connect({
+      const sessionPromise = getGeminiClient().live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         config: {
           responseModalities: [Modality.AUDIO],
