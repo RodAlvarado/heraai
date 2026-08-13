@@ -1,19 +1,36 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, Type, Modality } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
-import { Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, Loader2, Volume2 } from 'lucide-react';
+import { 
+  Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, 
+  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, ShieldAlert 
+} from 'lucide-react';
 import { ROLES_BY_CATEGORY } from './roles';
 import { VOICE_SYSTEM_PROMPT } from './systemPrompt';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { AuthModal } from './components/AuthModal';
+import { PricingModal } from './components/PricingModal';
+import { InterviewHistory } from './components/InterviewHistory';
+import { db } from './lib/firebase';
+import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
 
 // Initialize Gemini SDK
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export default function App() {
+function MainApp() {
+  const { user, profile, logout } = useAuth();
+  
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
   const [reportContent, setReportContent] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
+  
+  // Modals
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isPricingOpen, setIsPricingOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+
   const isAnsweringRef = useRef(false);
   const isCompletingRef = useRef(false);
   const pendingCompletionArgsRef = useRef<any>(null);
@@ -33,7 +50,6 @@ export default function App() {
       isAnsweringRef.current = false;
       sessionRef.current.sendRealtimeInput({ activityEnd: {} });
     } else {
-      // Stop any AI audio currently playing when the user starts answering
       stopAudio();
       setIsAnswering(true);
       isAnsweringRef.current = true;
@@ -209,8 +225,33 @@ export default function App() {
         contents: prompt
       });
       
-      setReportContent(response.text);
+      const markdownReport = response.text || "Report completed.";
+      setReportContent(markdownReport);
       setStep('report');
+
+      // Save to Firestore if user is authenticated
+      if (user) {
+        try {
+          await addDoc(collection(db, 'interviews'), {
+            userId: user.uid,
+            role: selectedRole,
+            report: markdownReport,
+            score: args?.recommended_score || 0,
+            redFlags: args?.red_flags || 0,
+            summary: args?.candidate_summary || '',
+            createdAt: serverTimestamp()
+          });
+
+          // Increment interview count in user document
+          const userRef = doc(db, 'users', user.uid);
+          await updateDoc(userRef, {
+            interviewsCount: increment(1)
+          });
+        } catch (dbErr) {
+          console.error("Failed to save interview record to Firestore:", dbErr);
+        }
+      }
+
     } catch (err) {
       console.error("Failed to generate report:", err);
       setReportContent("Failed to generate report. Please try again.");
@@ -219,6 +260,18 @@ export default function App() {
   };
 
   const startInterview = async (role: string) => {
+    // Check authentication or trial limits
+    if (!user) {
+      setIsAuthOpen(true);
+      return;
+    }
+
+    const currentLimit = profile?.interviewsLimit ?? 1;
+    if ((profile?.interviewsCount || 0) >= currentLimit) {
+      setIsPricingOpen(true);
+      return;
+    }
+
     setSelectedRole(role);
     setStep('interview');
     
@@ -265,7 +318,6 @@ export default function App() {
           onopen: () => {
             startRecording(sessionPromise);
             
-            // Trigger the AI to speak first by sending an initial text message
             sessionPromise.then(session => {
               session.sendClientContent({
                 turns: `Hello, I am ready for the ${role} interview. Please introduce yourself as the HR Manager and start the interview. I will be using a push-to-talk button to answer your questions.`,
@@ -295,14 +347,11 @@ export default function App() {
               }
             }
             
-            // If we have received the tool call AND the turn is complete, wait for audio to finish
             if (pendingCompletionArgsRef.current && isTurnCompleteRef.current && !isCompletingRef.current) {
               isCompletingRef.current = true;
               
-              // Recursively check if the audio queue has finished playing
               const checkAudioFinished = () => {
                 const currentTime = audioCtxRef.current?.currentTime || 0;
-                // If current time has caught up to the latest queued audio time, we are done
                 if (currentTime >= nextPlayTimeRef.current) {
                   handleInterviewComplete(pendingCompletionArgsRef.current);
                 } else {
@@ -310,7 +359,6 @@ export default function App() {
                 }
               };
               
-              // Start checking
               setTimeout(checkAudioFinished, 500);
             }
           },
@@ -340,26 +388,88 @@ export default function App() {
     });
   };
 
+  const isPro = profile?.subscriptionStatus === 'active';
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 shrink-0">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg flex items-center justify-center overflow-hidden bg-slate-50 border border-slate-100">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-slate-50 border border-slate-100 shadow-sm">
             <img src="/logo.png" alt="HERA Logo" className="w-full h-full object-cover" onError={(e) => {
-              // Fallback to Bot icon if logo.png is not found
               e.currentTarget.style.display = 'none';
               e.currentTarget.parentElement!.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-600"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>';
             }} />
           </div>
-          <h1 className="font-semibold text-lg tracking-tight text-slate-800">HERA <span className="text-slate-400 font-normal hidden sm:inline-block">| Human Evaluation & Recruitment AI</span></h1>
-        </div>
-        {step !== 'select_role' && (
-          <div className="flex items-center gap-2 text-sm font-medium text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
-            <Briefcase className="w-4 h-4" />
-            {selectedRole}
+          <div>
+            <h1 className="font-bold text-lg tracking-tight text-slate-900 flex items-center gap-2">
+              HERA <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold border border-indigo-100">SaaS</span>
+            </h1>
+            <p className="text-[11px] text-slate-400 hidden sm:block">Human Evaluation & Recruitment AI</p>
           </div>
-        )}
+        </div>
+
+        {/* Header Right Actions */}
+        <div className="flex items-center gap-3">
+          {/* Subscription Status Pill */}
+          <button
+            onClick={() => setIsPricingOpen(true)}
+            className={`flex items-center gap-1.5 text-xs font-semibold px-3.5 py-1.5 rounded-full border transition-all ${
+              profile?.subscriptionStatus === 'active' 
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
+                : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {profile?.subscriptionStatus === 'active' ? (
+                `${profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile.interviewsCount || 0}/${profile.interviewsLimit || 20})`
+              ) : user ? (
+                `Prueba Gratis (${profile?.interviewsCount || 0}/${profile?.interviewsLimit || 1})`
+              ) : (
+                'Planes & Precios'
+              )}
+            </span>
+          </button>
+
+          {/* User Auth Section */}
+          {user ? (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsHistoryOpen(true)}
+                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+                title="Historial de Entrevistas"
+              >
+                <History className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+                <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shadow-sm">
+                  {user.photoURL ? (
+                    <img src={user.photoURL} alt={user.displayName || 'User'} className="w-full h-full rounded-full object-cover" />
+                  ) : (
+                    (user.displayName?.[0] || user.email?.[0] || 'U').toUpperCase()
+                  )}
+                </div>
+                <button
+                  onClick={logout}
+                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                  title="Cerrar Sesión"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsAuthOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm transition-all"
+            >
+              <UserIcon className="w-4 h-4" />
+              Iniciar Sesión
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Main Content */}
@@ -367,34 +477,43 @@ export default function App() {
         
         {/* Step 1: Role Selection */}
         {step === 'select_role' && (
-          <div className="flex-1 flex flex-col items-center justify-center max-w-2xl mx-auto w-full py-12 overflow-y-auto">
-            <div className="text-center mb-10">
-              <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-slate-900 mb-4">
-                Welcome to HERA
+          <div className="flex-1 flex flex-col items-center justify-center max-w-3xl mx-auto w-full py-6 overflow-y-auto">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-3 border border-indigo-100">
+                <Sparkles className="w-3.5 h-3.5" />
+                Plataforma de Entrevistas de Voz con IA
+              </div>
+              <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 mb-3">
+                Practica tus entrevistas con HERA, tu reclutadora de IA
               </h2>
-              <p className="text-lg text-slate-600">
-                Human Evaluation & Recruitment AI. Select the role you are applying for to begin your structured AI voice interview.
+              <p className="text-sm md:text-base text-slate-600 max-w-xl mx-auto">
+                Selecciona el puesto, realiza la entrevista y te entrega un reporte completo sobre tu feedback
               </p>
             </div>
 
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 w-full max-h-[60vh] overflow-y-auto">
-              <h3 className="font-medium text-slate-900 mb-6 flex items-center gap-2 sticky top-0 bg-white z-10 pb-2 border-b border-slate-100">
-                <Briefcase className="w-5 h-5 text-indigo-500" />
-                Available Roles
+            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 w-full max-h-[58vh] overflow-y-auto">
+              <h3 className="font-bold text-slate-900 mb-6 flex items-center justify-between sticky top-0 bg-white z-10 pb-3 border-b border-slate-100">
+                <span className="flex items-center gap-2">
+                  <Briefcase className="w-5 h-5 text-indigo-600" />
+                  Catálogo de Puestos Disponibles
+                </span>
+                <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">
+                  30+ Roles
+                </span>
               </h3>
               <div className="space-y-8">
                 {Object.entries(ROLES_BY_CATEGORY).map(([category, roles]) => (
                   <div key={category}>
-                    <h4 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-3">{category}</h4>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">{category}</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {roles.map(role => (
                         <button
                           key={role}
                           onClick={() => startInterview(role)}
-                          className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-all text-left group"
+                          className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/40 transition-all text-left group shadow-2xs"
                         >
-                          <span className="font-medium text-slate-700 group-hover:text-indigo-700">{role}</span>
-                          <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-indigo-500" />
+                          <span className="font-semibold text-xs text-slate-800 group-hover:text-indigo-700">{role}</span>
+                          <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600 transition-transform group-hover:translate-x-0.5" />
                         </button>
                       ))}
                     </div>
@@ -407,17 +526,16 @@ export default function App() {
 
         {/* Step 2: Voice Interview */}
         {step === 'interview' && (
-          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden max-w-4xl mx-auto w-full p-8">
-            <div className="text-center mb-12">
-              <h2 className="text-2xl font-bold text-slate-900 mb-2">Voice Interview in Progress</h2>
-              <p className="text-slate-500">
-                Listen to the AI's question, then click <strong>"Start Answering"</strong> to speak.
-                <br />
-                Click <strong>"Finish Answering"</strong> when you are done.
+          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden max-w-4xl mx-auto w-full p-8">
+            <div className="text-center mb-10">
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">Entrevista de Voz en Curso</h2>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Escucha la pregunta de HERA, luego presiona <strong>"Empezar a Responder"</strong> para hablar.
+                Al finalizar, presiona <strong>"Terminar Respuesta"</strong>.
               </p>
             </div>
 
-            <div className="relative flex items-center justify-center w-48 h-48 mb-12">
+            <div className="relative flex items-center justify-center w-48 h-48 mb-10">
               {isAnswering && (
                 <>
                   <div className="absolute inset-0 rounded-full bg-indigo-100 animate-ping opacity-75" style={{ animationDuration: '3s' }}></div>
@@ -436,94 +554,115 @@ export default function App() {
                 }`}
               >
                 {isAnswering ? (
-                  <MicOff className="w-10 h-10 text-white mb-1" />
+                  <MicOff className="w-9 h-9 text-white mb-1" />
                 ) : (
-                  <Mic className="w-10 h-10 text-white mb-1" />
+                  <Mic className="w-9 h-9 text-white mb-1" />
                 )}
-                <span className="text-white text-sm font-medium text-center leading-tight mt-1">
-                  {isAnswering ? <>Finish<br/>Answering</> : <>Start<br/>Answering</>}
+                <span className="text-white text-xs font-bold text-center leading-tight mt-1">
+                  {isAnswering ? <>Terminar<br/>Respuesta</> : <>Empezar a<br/>Responder</>}
                 </span>
               </button>
             </div>
 
-            <div className="flex items-center gap-3 text-slate-600 bg-slate-50 px-6 py-3 rounded-full border border-slate-200 mb-12">
+            <div className="flex items-center gap-3 text-slate-600 bg-slate-50 px-6 py-3 rounded-full border border-slate-200 mb-10 text-xs">
               {isRecording ? (
                 isAnswering ? (
                   <>
-                    <Volume2 className="w-5 h-5 text-red-500 animate-pulse" />
-                    <span className="font-medium">Recording your answer...</span>
+                    <Volume2 className="w-4 h-4 text-red-500 animate-pulse" />
+                    <span className="font-medium text-red-700">Grabando tu respuesta...</span>
                   </>
                 ) : (
                   <>
-                    <Bot className="w-5 h-5 text-indigo-500" />
-                    <span className="font-medium">AI is speaking or processing...</span>
+                    <Bot className="w-4 h-4 text-indigo-600" />
+                    <span className="font-medium">HERA está hablando o procesando...</span>
                   </>
                 )
               ) : (
                 <>
-                  <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
-                  <span className="font-medium">Connecting to HERA...</span>
+                  <Loader2 className="w-4 h-4 text-slate-400 animate-spin" />
+                  <span className="font-medium">Conectando con HERA...</span>
                 </>
               )}
             </div>
 
             <button
               onClick={endInterviewEarly}
-              className="flex items-center gap-2 px-6 py-3 bg-red-50 text-red-600 font-medium rounded-xl hover:bg-red-100 transition-colors"
+              className="flex items-center gap-2 px-5 py-2.5 bg-red-50 text-red-600 font-semibold text-xs rounded-xl hover:bg-red-100 transition-colors"
             >
-              <Square className="w-4 h-4" />
-              End Interview Early
+              <Square className="w-3.5 h-3.5" />
+              Finalizar Entrevista
             </button>
           </div>
         )}
 
         {/* Step 3: Generating Report */}
         {step === 'generating_report' && (
-          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-2xl shadow-sm border border-slate-200 max-w-4xl mx-auto w-full p-8">
-            <div className="w-20 h-20 bg-indigo-50 rounded-2xl flex items-center justify-center mb-6">
+          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 max-w-4xl mx-auto w-full p-8">
+            <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mb-6 border border-indigo-100 shadow-inner">
               <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
             </div>
-            <h2 className="text-2xl font-bold text-slate-900 mb-2">Generating Evaluation Report</h2>
-            <p className="text-slate-500 text-center max-w-md">
-              HERA is analyzing your responses, scoring your technical expertise, and preparing the final recommendation.
+            <h2 className="text-2xl font-bold text-slate-900 mb-2">Generando Reporte de Evaluación</h2>
+            <p className="text-xs text-slate-500 text-center max-w-md">
+              HERA está analizando las respuestas, asignando puntaje técnico y guardando la evaluación en la base de datos de tu cuenta.
             </p>
           </div>
         )}
 
         {/* Step 4: Report View */}
         {step === 'report' && (
-          <div className="flex-1 flex flex-col items-center justify-center py-8 w-full overflow-y-auto">
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 w-full max-w-3xl overflow-hidden">
+          <div className="flex-1 flex flex-col items-center justify-center py-6 w-full overflow-y-auto">
+            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 w-full max-w-3xl overflow-hidden">
               <div className="bg-indigo-600 px-6 py-8 text-white text-center">
-                <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <CheckCircle2 className="w-8 h-8 text-white" />
+                <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                  <CheckCircle2 className="w-7 h-7 text-white" />
                 </div>
-                <h2 className="text-2xl font-bold mb-2">Interview Complete</h2>
-                <p className="text-indigo-100">HERA has generated your evaluation report.</p>
+                <h2 className="text-2xl font-bold mb-1">Entrevista Finalizada</h2>
+                <p className="text-indigo-100 text-xs">HERA ha generado el reporte ejecutivo para esta vacante.</p>
               </div>
               
               <div className="p-6 md:p-8">
-                <div className="prose prose-slate max-w-none">
-                  <ReactMarkdown>{reportContent || "No report generated."}</ReactMarkdown>
+                <div className="prose prose-slate max-w-none text-xs">
+                  <ReactMarkdown>{reportContent || "No se generó reporte."}</ReactMarkdown>
                 </div>
                 
-                <div className="mt-10 flex justify-center">
+                <div className="mt-8 flex justify-center gap-3">
                   <button
                     onClick={() => {
                       setStep('select_role');
                       setReportContent(null);
                       setSelectedRole('');
                     }}
-                    className="px-6 py-3 bg-slate-100 text-slate-700 font-medium rounded-xl hover:bg-slate-200 transition-colors"
+                    className="px-6 py-2.5 bg-slate-900 text-white font-medium text-xs rounded-xl hover:bg-slate-800 transition-colors shadow-sm"
                   >
-                    Start New Interview
+                    Evaluar Otro Puesto
                   </button>
+                  {user && (
+                    <button
+                      onClick={() => setIsHistoryOpen(true)}
+                      className="px-6 py-2.5 bg-slate-100 text-slate-700 font-medium text-xs rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Ver Historial
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
           </div>
         )}
       </main>
+
+      {/* SaaS Modals */}
+      <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} />
+      <PricingModal isOpen={isPricingOpen} onClose={() => setIsPricingOpen(false)} />
+      <InterviewHistory isOpen={isHistoryOpen} onClose={() => setIsHistoryOpen(false)} />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <MainApp />
+    </AuthProvider>
   );
 }
