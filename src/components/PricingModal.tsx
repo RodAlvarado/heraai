@@ -31,6 +31,12 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
   const currentLimit = profile?.interviewsLimit ?? (isSubscribed ? (currentPlan === 'basic' ? 5 : currentPlan === 'corp' ? 100 : 20) : 2);
   const isLimitReached = (profile?.interviewsCount || 0) >= currentLimit;
 
+  const STRIPE_PAYMENT_LINKS = {
+    basic: 'https://buy.stripe.com/bJe14p5067rd9qDf6r2cg01',
+    pro: 'https://buy.stripe.com/aFaeVf78efXJ9qD6zV2cg02',
+    corp: 'https://buy.stripe.com/cNi9AVeAGaDp1Yb8I32cg03',
+  };
+
   const handleSubscribe = async (planKey: 'basic' | 'pro' | 'corp') => {
     if (!user) {
       alert('Por favor inicia sesión antes de suscribirte.');
@@ -40,8 +46,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
     setLoadingPlan(planKey);
     setNotice(null);
 
-    const limits = { basic: 5, pro: 20, corp: 100 };
-
+    // Try dynamic server session first if configured, else use exact Stripe Payment Links provided
     try {
       const response = await fetch('/api/stripe/create-checkout-session', {
         method: 'POST',
@@ -56,25 +61,22 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
       const data = await response.json();
 
       if (data.url) {
-        // Redirect to Stripe Checkout
         window.location.href = data.url;
-      } else if (data.demoMode) {
-        // Activate demo subscription directly in Firestore
-        const userRef = doc(db, 'users', user.uid);
-        await updateDoc(userRef, {
-          subscriptionStatus: 'active',
-          subscriptionPlan: planKey,
-          interviewsLimit: limits[planKey],
-        });
-        await refreshProfile();
-        setNotice(`¡Plan ${planKey.toUpperCase()} activado exitosamente! (Límite: ${limits[planKey]} entrevistas/mes).`);
+        return;
       }
-    } catch (err: any) {
-      console.error('Error starting checkout:', err);
-      setNotice('Error al conectar con la pasarela de pago.');
-    } finally {
-      setLoadingPlan(null);
+    } catch (err) {
+      console.warn('Backend checkout creation skipped, redirecting directly to Stripe Payment Link');
     }
+
+    // Direct Stripe Payment Link with user metadata appended
+    const baseUrl = STRIPE_PAYMENT_LINKS[planKey];
+    const targetUrl = new URL(baseUrl);
+    targetUrl.searchParams.set('client_reference_id', user.uid);
+    if (user.email) {
+      targetUrl.searchParams.set('prefilled_email', user.email);
+    }
+
+    window.location.href = targetUrl.toString();
   };
 
   const handleManageSubscription = async () => {

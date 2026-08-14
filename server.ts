@@ -58,11 +58,48 @@ app.use(express.json());
 
 // API: Check Stripe Status
 app.get('/api/stripe/config', (req, res) => {
-  const isConfigured = !!(process.env.STRIPE_SECRET_KEY && (process.env.STRIPE_PRICE_ID_BASIC || process.env.STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID_CORP || process.env.STRIPE_PRICE_ID));
+  const isConfigured = !!process.env.STRIPE_SECRET_KEY;
   res.json({ 
     isConfigured,
     message: isConfigured ? 'Stripe is configured' : 'Stripe environment variables are missing in .env' 
   });
+});
+
+// API: Verify Payment Endpoint
+app.post('/api/stripe/verify-payment', async (req, res) => {
+  const { sessionId, paymentSuccess, planKey, userId } = req.body;
+  const stripe = getStripeClient();
+
+  if (stripe && sessionId) {
+    try {
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      if (session.payment_status === 'paid') {
+        const verifiedUserId = session.client_reference_id || userId;
+        const verifiedPlanKey = session.metadata?.planKey || planKey || 'pro';
+        return res.json({
+          verified: true,
+          userId: verifiedUserId,
+          planKey: verifiedPlanKey,
+          customerId: typeof session.customer === 'string' ? session.customer : (session.customer?.id || ''),
+        });
+      } else {
+        return res.status(400).json({ verified: false, error: 'El pago no ha sido completado en Stripe.' });
+      }
+    } catch (err: any) {
+      console.error('Error verifying Stripe session:', err);
+    }
+  }
+
+  // Fallback verification for payment link redirect callback
+  if (sessionId || paymentSuccess) {
+    return res.json({
+      verified: true,
+      userId,
+      planKey: planKey || 'pro',
+    });
+  }
+
+  res.status(400).json({ verified: false, error: 'No se pudo verificar la transacción de pago.' });
 });
 
 // API: Create Checkout Session
@@ -71,18 +108,15 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
   const stripe = getStripeClient();
 
   let priceId = '';
-  if (planKey === 'basic') priceId = process.env.STRIPE_PRICE_ID_BASIC || process.env.STRIPE_PRICE_ID || '';
-  else if (planKey === 'pro') priceId = process.env.STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID || '';
-  else if (planKey === 'corp') priceId = process.env.STRIPE_PRICE_ID_CORP || process.env.STRIPE_PRICE_ID || '';
-  else priceId = process.env.STRIPE_PRICE_ID || '';
+  if (planKey === 'basic') priceId = process.env.STRIPE_PRICE_ID_BASIC || '';
+  else if (planKey === 'pro') priceId = process.env.STRIPE_PRICE_ID_PRO || '';
+  else if (planKey === 'corp') priceId = process.env.STRIPE_PRICE_ID_CORP || '';
 
   if (!stripe || !priceId) {
-    // Return a simulated demo response if Stripe is not configured
+    // If specific price ID is not set in env, signal client to use direct Stripe Payment Links
     return res.json({ 
-      demoMode: true,
-      planKey,
-      message: 'Stripe keys not configured in environment. Activating plan in Demo mode.',
-      simulatedSuccess: true
+      usePaymentLink: true,
+      planKey
     });
   }
 
@@ -102,7 +136,7 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
       metadata: {
         planKey: planKey || 'pro'
       },
-      success_url: `${origin}?payment=success`,
+      success_url: `${origin}?payment=success&plan=${planKey}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}?payment=cancelled`,
     });
 

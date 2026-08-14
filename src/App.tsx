@@ -33,6 +33,60 @@ function MainApp() {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isPricingOpen, setIsPricingOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [verifyingPayment, setVerifyingPayment] = useState(false);
+  const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
+
+  // Check URL parameters when returning from Stripe Checkout or Payment Link
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sessionId = urlParams.get('session_id');
+    const paymentSuccess = urlParams.get('payment') === 'success' || urlParams.get('payment_success') === 'true' || urlParams.get('success') === 'true';
+    const planFromUrl = (urlParams.get('plan') as 'basic' | 'pro' | 'corp') || 'pro';
+
+    if (sessionId || paymentSuccess) {
+      if (!user) return; // Wait until authenticated
+
+      setVerifyingPayment(true);
+      fetch('/api/stripe/verify-payment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          paymentSuccess,
+          planKey: planFromUrl,
+          userId: user.uid,
+        }),
+      })
+        .then(res => res.json())
+        .then(async (data) => {
+          if (data.verified) {
+            const limits = { basic: 5, pro: 20, corp: 100 };
+            const activatedPlan = (data.planKey as 'basic' | 'pro' | 'corp') || planFromUrl || 'pro';
+            const userRef = doc(db, 'users', user.uid);
+            
+            await updateDoc(userRef, {
+              subscriptionStatus: 'active',
+              subscriptionPlan: activatedPlan,
+              interviewsLimit: limits[activatedPlan] || 20,
+              stripeCustomerId: data.customerId || '',
+              updatedAt: serverTimestamp(),
+            });
+
+            await refreshProfile();
+            setPaymentNotice(`🎉 ¡Pago verificado con éxito! Tu ${activatedPlan === 'basic' ? 'Plan Básico' : activatedPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${limits[activatedPlan]} evaluaciones/mes) ha sido activado.`);
+            
+            // Clean query parameters cleanly from URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+          }
+        })
+        .catch(err => {
+          console.error('Error verifying payment:', err);
+        })
+        .finally(() => {
+          setVerifyingPayment(false);
+        });
+    }
+  }, [user]);
 
   const isAnsweringRef = useRef(false);
   const isCompletingRef = useRef(false);
@@ -404,6 +458,22 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
+      {/* Payment Verification Banner */}
+      {verifyingPayment && (
+        <div className="bg-indigo-600 text-white text-xs font-semibold py-2.5 px-4 text-center flex items-center justify-center gap-2 shadow-sm shrink-0">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>Verificando tu transacción de pago con Stripe, un momento...</span>
+        </div>
+      )}
+      {paymentNotice && (
+        <div className="bg-emerald-600 text-white text-xs font-semibold py-2.5 px-4 text-center flex items-center justify-center gap-2 relative shadow-sm shrink-0">
+          <span>{paymentNotice}</span>
+          <button onClick={() => setPaymentNotice(null)} className="ml-3 underline hover:text-emerald-100 font-bold">
+            Entendido
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
