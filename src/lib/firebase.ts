@@ -64,7 +64,16 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
   const userSnap = await getDoc(userRef);
 
   if (userSnap.exists()) {
-    return userSnap.data() as UserProfile;
+    const data = userSnap.data() as UserProfile;
+    if (data.interviewsLimit === undefined) {
+      data.interviewsLimit = data.subscriptionStatus === 'active' 
+        ? (data.subscriptionPlan === 'basic' ? 5 : data.subscriptionPlan === 'corp' ? 100 : 20)
+        : 2;
+    }
+    if (data.interviewsCount === undefined) {
+      data.interviewsCount = 0;
+    }
+    return data;
   }
 
   const newProfile: UserProfile = {
@@ -74,7 +83,7 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
     photoURL: user.photoURL || '',
     subscriptionStatus: 'free_trial',
     interviewsCount: 0,
-    interviewsLimit: 1, // 1 free trial interview
+    interviewsLimit: 2, // 2 free trial interviews
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };

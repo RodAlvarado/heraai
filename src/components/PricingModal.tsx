@@ -28,6 +28,8 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
 
   const currentPlan = profile?.subscriptionPlan;
   const isSubscribed = profile?.subscriptionStatus === 'active';
+  const currentLimit = profile?.interviewsLimit ?? (isSubscribed ? (currentPlan === 'basic' ? 5 : currentPlan === 'corp' ? 100 : 20) : 2);
+  const isLimitReached = (profile?.interviewsCount || 0) >= currentLimit;
 
   const handleSubscribe = async (planKey: 'basic' | 'pro' | 'corp') => {
     if (!user) {
@@ -126,7 +128,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
 
         {/* Content Body */}
         <div className="p-6 md:p-8 overflow-y-auto flex-1">
-          {notice && (
+          {notice ? (
             <div className="mb-6 p-4 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
               <div>
@@ -134,7 +136,15 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 <p>{notice}</p>
               </div>
             </div>
-          )}
+          ) : isLimitReached ? (
+            <div className="mb-6 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold mb-0.5">Límite de Evaluaciones Alcanzado ({profile?.interviewsCount || 0}/{currentLimit})</p>
+                <p>Has alcanzado el límite de evaluaciones de tu plan actual. Selecciona un plan a continuación para continuar realizando entrevistas.</p>
+              </div>
+            </div>
+          ) : null}
 
           {/* 3 Plans Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-stretch">

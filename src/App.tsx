@@ -21,7 +21,7 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 function MainApp() {
-  const { user, profile, logout } = useAuth();
+  const { user, profile, logout, refreshProfile } = useAuth();
   
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
@@ -250,6 +250,9 @@ function MainApp() {
           await updateDoc(userRef, {
             interviewsCount: increment(1)
           });
+
+          // Refresh profile so React state updates immediately
+          await refreshProfile();
         } catch (dbErr) {
           console.error("Failed to save interview record to Firestore:", dbErr);
         }
@@ -269,8 +272,13 @@ function MainApp() {
       return;
     }
 
-    const currentLimit = profile?.interviewsLimit ?? 1;
-    if ((profile?.interviewsCount || 0) >= currentLimit) {
+    // Refresh profile from Firestore to ensure we have the absolute latest count and plan status
+    await refreshProfile();
+
+    const currentLimit = profile?.interviewsLimit ?? (profile?.subscriptionStatus === 'active' ? (profile?.subscriptionPlan === 'basic' ? 5 : profile?.subscriptionPlan === 'corp' ? 100 : 20) : 2);
+    const currentCount = profile?.interviewsCount || 0;
+
+    if (currentCount >= currentLimit) {
       setIsPricingOpen(true);
       return;
     }
@@ -392,6 +400,7 @@ function MainApp() {
   };
 
   const isPro = profile?.subscriptionStatus === 'active';
+  const userLimit = profile?.interviewsLimit ?? (isPro ? (profile?.subscriptionPlan === 'basic' ? 5 : profile?.subscriptionPlan === 'corp' ? 100 : 20) : 2);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
@@ -426,9 +435,9 @@ function MainApp() {
             <Zap className="w-3.5 h-3.5 shrink-0" />
             <span>
               {profile?.subscriptionStatus === 'active' ? (
-                `${profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile.interviewsCount || 0}/${profile.interviewsLimit || 20})`
+                `${profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile.interviewsCount || 0}/${userLimit})`
               ) : user ? (
-                `Prueba Gratis (${profile?.interviewsCount || 0}/${profile?.interviewsLimit || 1})`
+                `Prueba Gratis (${profile?.interviewsCount || 0}/${userLimit})`
               ) : (
                 'Planes & Precios'
               )}
