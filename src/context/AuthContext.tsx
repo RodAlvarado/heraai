@@ -35,10 +35,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const fetchProfile = async (currentUser: User) => {
     try {
-      const userDoc = await syncUserProfile(currentUser);
+      const timeoutPromise = new Promise<UserProfile>((_, reject) =>
+        setTimeout(() => reject(new Error('Profile sync timeout')), 3500)
+      );
+      const userDoc = await Promise.race([syncUserProfile(currentUser), timeoutPromise]);
       setProfile(userDoc);
     } catch (err) {
-      console.error("Error fetching user profile:", err);
+      console.error("Error fetching user profile, applying fallback profile:", err);
+      setProfile({
+        uid: currentUser.uid,
+        email: currentUser.email || '',
+        displayName: currentUser.displayName || currentUser.email?.split('@')[0] || 'Usuario',
+        photoURL: currentUser.photoURL || '',
+        subscriptionStatus: 'free_trial',
+        interviewsCount: 0,
+        interviewsLimit: 2,
+      });
     }
   };
 

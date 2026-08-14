@@ -60,36 +60,49 @@ export interface InterviewRecord {
 
 // Get or initialize user profile document in Firestore
 export async function syncUserProfile(user: User): Promise<UserProfile> {
-  const userRef = doc(db, 'users', user.uid);
-  const userSnap = await getDoc(userRef);
+  try {
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
 
-  if (userSnap.exists()) {
-    const data = userSnap.data() as UserProfile;
-    if (data.interviewsLimit === undefined) {
-      data.interviewsLimit = data.subscriptionStatus === 'active' 
-        ? (data.subscriptionPlan === 'basic' ? 5 : data.subscriptionPlan === 'corp' ? 100 : 20)
-        : 2;
+    if (userSnap.exists()) {
+      const data = userSnap.data() as UserProfile;
+      if (data.interviewsLimit === undefined) {
+        data.interviewsLimit = data.subscriptionStatus === 'active' 
+          ? (data.subscriptionPlan === 'basic' ? 5 : data.subscriptionPlan === 'corp' ? 100 : 20)
+          : 2;
+      }
+      if (data.interviewsCount === undefined) {
+        data.interviewsCount = 0;
+      }
+      return data;
     }
-    if (data.interviewsCount === undefined) {
-      data.interviewsCount = 0;
-    }
-    return data;
+
+    const newProfile: UserProfile = {
+      uid: user.uid,
+      email: user.email || '',
+      displayName: user.displayName || user.email?.split('@')[0] || 'Usuario',
+      photoURL: user.photoURL || '',
+      subscriptionStatus: 'free_trial',
+      interviewsCount: 0,
+      interviewsLimit: 2, // 2 free trial interviews
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    await setDoc(userRef, newProfile);
+    return newProfile;
+  } catch (err) {
+    console.warn("Firestore sync error, returning local user profile fallback:", err);
+    return {
+      uid: user.uid,
+      email: user.email || '',
+      displayName: user.displayName || user.email?.split('@')[0] || 'Usuario',
+      photoURL: user.photoURL || '',
+      subscriptionStatus: 'free_trial',
+      interviewsCount: 0,
+      interviewsLimit: 2,
+    };
   }
-
-  const newProfile: UserProfile = {
-    uid: user.uid,
-    email: user.email || '',
-    displayName: user.displayName || user.email?.split('@')[0] || 'User',
-    photoURL: user.photoURL || '',
-    subscriptionStatus: 'free_trial',
-    interviewsCount: 0,
-    interviewsLimit: 2, // 2 free trial interviews
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-
-  await setDoc(userRef, newProfile);
-  return newProfile;
 }
 
 export {
