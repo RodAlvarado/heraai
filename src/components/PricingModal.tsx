@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Check, Zap, CreditCard, Shield, X, AlertCircle, Building2, User, Sparkles } from 'lucide-react';
+import { Check, Zap, CreditCard, Shield, X, AlertCircle, Building2, User, Sparkles, UserMinus } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 
 interface PricingModalProps {
   isOpen: boolean;
@@ -12,6 +12,7 @@ interface PricingModalProps {
 export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) => {
   const { user, profile, refreshProfile } = useAuth();
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
+  const [cancelingSubscription, setCancelingSubscription] = useState(false);
   const [stripeConfigured, setStripeConfigured] = useState<boolean | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -77,6 +78,33 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
     }
 
     window.location.href = targetUrl.toString();
+  };
+
+  const handleUnsubscribe = async () => {
+    if (!user) return;
+    const confirmCancel = window.confirm(
+      '¿Estás seguro de que deseas desuscribirte? Tu plan se cancelará y tu cuenta volverá al plan gratuito con 2 evaluaciones.'
+    );
+    if (!confirmCancel) return;
+
+    setCancelingSubscription(true);
+    setNotice(null);
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, {
+        subscriptionStatus: 'free_trial',
+        subscriptionPlan: null,
+        interviewsLimit: 2,
+        updatedAt: serverTimestamp(),
+      });
+      await refreshProfile();
+      setNotice('Tu suscripción ha sido cancelada exitosamente. Tu cuenta ahora se encuentra en la versión gratuita.');
+    } catch (err: any) {
+      console.error('Error al desuscribir:', err);
+      alert('Hubo un error al procesar la desuscripción. Por favor inténtalo de nuevo.');
+    } finally {
+      setCancelingSubscription(false);
+    }
   };
 
   const handleManageSubscription = async () => {
@@ -148,6 +176,40 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
             </div>
           ) : null}
 
+          {/* Active Subscription Banner with Unsubscribe button on right */}
+          {isSubscribed && (
+            <div className="mb-6 p-4 rounded-2xl bg-emerald-50/40 border border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3 w-full sm:w-auto">
+                <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold shrink-0">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs font-bold text-slate-900">
+                      Suscripción Activa: {currentPlan === 'basic' ? 'Plan Básico' : currentPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'}
+                    </p>
+                    <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                      Activo
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Has utilizado {profile?.interviewsCount || 0} de {currentLimit} evaluaciones este mes.
+                  </p>
+                </div>
+              </div>
+
+              {/* Botón de Desuscripción en el lado derecho */}
+              <button
+                onClick={handleUnsubscribe}
+                disabled={cancelingSubscription}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl border border-red-200 bg-white hover:bg-red-50 text-red-600 text-xs font-semibold transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                <UserMinus className="w-3.5 h-3.5" />
+                {cancelingSubscription ? 'Cancelando...' : 'Desuscribirme'}
+              </button>
+            </div>
+          )}
+
           {/* 3 Plans Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-stretch">
             
@@ -168,7 +230,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   <User className="w-4 h-4 text-slate-500" />
                   Plan Básico
                 </div>
-                <p className="text-[11px] text-slate-500 mb-4">Ideal para pequeños reclutadores o startups con pocas vacantes al mes.</p>
+                <p className="text-[11px] text-slate-500 mb-4">Ideal para pequeños reclutadores o si estas buscando trabajo en empresas americanas de forma sencilla.</p>
 
                 <div className="flex items-baseline gap-1 mb-4 pb-4 border-b border-slate-100">
                   <span className="text-3xl font-extrabold text-slate-900">$9.99</span>
@@ -199,17 +261,28 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </ul>
               </div>
 
-              <button
-                onClick={() => handleSubscribe('basic')}
-                disabled={loadingPlan !== null}
-                className={`w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs ${
-                  currentPlan === 'basic' && isSubscribed
-                    ? 'bg-slate-100 text-slate-500 cursor-default'
-                    : 'bg-slate-900 hover:bg-slate-800 text-white'
-                }`}
-              >
-                {loadingPlan === 'basic' ? 'Procesando...' : (currentPlan === 'basic' && isSubscribed ? 'Plan Activo' : 'Seleccionar Plan Básico')}
-              </button>
+              {currentPlan === 'basic' && isSubscribed ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 py-2.5 px-3 bg-emerald-100/60 text-emerald-800 font-semibold text-xs rounded-xl text-center border border-emerald-200">
+                    Plan Activo
+                  </div>
+                  <button
+                    onClick={handleUnsubscribe}
+                    disabled={cancelingSubscription}
+                    className="py-2.5 px-3 bg-red-50 hover:bg-red-100 text-red-600 font-semibold text-xs rounded-xl border border-red-200 transition-all cursor-pointer"
+                  >
+                    Desuscribir
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleSubscribe('basic')}
+                  disabled={loadingPlan !== null || cancelingSubscription}
+                  className="w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs bg-slate-900 hover:bg-slate-800 text-white cursor-pointer"
+                >
+                  {loadingPlan === 'basic' ? 'Procesando...' : 'Seleccionar Plan Básico'}
+                </button>
+              )}
             </div>
 
             {/* PLAN PRO (DESTACADO) */}
@@ -228,7 +301,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   <Zap className="w-4 h-4 text-indigo-600" />
                   Plan Pro
                 </div>
-                <p className="text-[11px] text-slate-500 mb-4">Para consultores de RRHH y agencias de selección activas.</p>
+                <p className="text-[11px] text-slate-500 mb-4">Para consultores de RRHH o estas postulando de forma constante a entrevistas para encontrar trabajos remotos en USA.</p>
 
                 <div className="flex items-baseline gap-1 mb-4 pb-4 border-b border-indigo-100">
                   <span className="text-4xl font-extrabold text-slate-900">$29.99</span>
@@ -263,17 +336,28 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </ul>
               </div>
 
-              <button
-                onClick={() => handleSubscribe('pro')}
-                disabled={loadingPlan !== null}
-                className={`w-full py-3 px-4 font-bold text-xs rounded-xl transition-all shadow-md ${
-                  currentPlan === 'pro' && isSubscribed
-                    ? 'bg-slate-100 text-slate-500 cursor-default'
-                    : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'
-                }`}
-              >
-                {loadingPlan === 'pro' ? 'Procesando...' : (currentPlan === 'pro' && isSubscribed ? 'Plan Activo' : 'Seleccionar Plan Pro')}
-              </button>
+              {currentPlan === 'pro' && isSubscribed ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 py-3 px-3 bg-emerald-100/60 text-emerald-800 font-bold text-xs rounded-xl text-center border border-emerald-200">
+                    Plan Activo
+                  </div>
+                  <button
+                    onClick={handleUnsubscribe}
+                    disabled={cancelingSubscription}
+                    className="py-3 px-3 bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs rounded-xl border border-red-200 transition-all cursor-pointer"
+                  >
+                    Desuscribir
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleSubscribe('pro')}
+                  disabled={loadingPlan !== null || cancelingSubscription}
+                  className="w-full py-3 px-4 font-bold text-xs rounded-xl transition-all shadow-md bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200 cursor-pointer"
+                >
+                  {loadingPlan === 'pro' ? 'Procesando...' : 'Seleccionar Plan Pro'}
+                </button>
+              )}
             </div>
 
             {/* PLAN CORPORATIVO */}
@@ -332,17 +416,28 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </ul>
               </div>
 
-              <button
-                onClick={() => handleSubscribe('corp')}
-                disabled={loadingPlan !== null}
-                className={`w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs ${
-                  currentPlan === 'corp' && isSubscribed
-                    ? 'bg-slate-800 text-slate-400 cursor-default'
-                    : 'bg-white hover:bg-slate-100 text-slate-900'
-                }`}
-              >
-                {loadingPlan === 'corp' ? 'Procesando...' : (currentPlan === 'corp' && isSubscribed ? 'Plan Activo' : 'Seleccionar Corporativo')}
-              </button>
+              {currentPlan === 'corp' && isSubscribed ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 py-2.5 px-3 bg-emerald-900/60 text-emerald-300 font-semibold text-xs rounded-xl text-center border border-emerald-700">
+                    Plan Activo
+                  </div>
+                  <button
+                    onClick={handleUnsubscribe}
+                    disabled={cancelingSubscription}
+                    className="py-2.5 px-3 bg-red-950/60 hover:bg-red-900/80 text-red-300 font-semibold text-xs rounded-xl border border-red-800 transition-all cursor-pointer"
+                  >
+                    Desuscribir
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleSubscribe('corp')}
+                  disabled={loadingPlan !== null || cancelingSubscription}
+                  className="w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs bg-white hover:bg-slate-100 text-slate-900 cursor-pointer"
+                >
+                  {loadingPlan === 'corp' ? 'Procesando...' : 'Seleccionar Corporativo'}
+                </button>
+              )}
             </div>
 
           </div>

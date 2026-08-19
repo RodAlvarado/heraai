@@ -7,6 +7,8 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   updateProfile, 
+  sendEmailVerification,
+  reload,
   signOut, 
   onAuthStateChanged, 
   syncUserProfile, 
@@ -22,6 +24,8 @@ interface AuthContextType {
   loginWithGoogle: () => Promise<void>;
   loginWithEmail: (email: string, pass: string) => Promise<void>;
   signUpWithEmail: (email: string, pass: string, name: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<void>;
+  checkEmailVerification: () => Promise<boolean>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -108,11 +112,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await createUserWithEmailAndPassword(auth, email, pass);
       if (res.user) {
         await updateProfile(res.user, { displayName: name });
+        try {
+          // Send Firebase verification email
+          await sendEmailVerification(res.user);
+        } catch (mailErr) {
+          console.warn("Could not send verification email:", mailErr);
+        }
         await fetchProfile(res.user);
       }
     } finally {
       setLoading(false);
     }
+  };
+
+  const sendVerificationEmail = async () => {
+    if (auth.currentUser) {
+      await sendEmailVerification(auth.currentUser);
+    }
+  };
+
+  const checkEmailVerification = async (): Promise<boolean> => {
+    if (auth.currentUser) {
+      await reload(auth.currentUser);
+      const isVerified = auth.currentUser.emailVerified;
+      setUser({ ...auth.currentUser });
+      return isVerified;
+    }
+    return false;
   };
 
   const logout = async () => {
@@ -129,6 +155,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       loginWithGoogle,
       loginWithEmail,
       signUpWithEmail,
+      sendVerificationEmail,
+      checkEmailVerification,
       logout,
       refreshProfile
     }}>

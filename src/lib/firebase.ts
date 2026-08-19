@@ -6,6 +6,8 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   updateProfile,
+  sendEmailVerification,
+  reload,
   signOut, 
   onAuthStateChanged,
   User 
@@ -110,6 +112,8 @@ export {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updateProfile,
+  sendEmailVerification,
+  reload,
   signOut,
   onAuthStateChanged
 };

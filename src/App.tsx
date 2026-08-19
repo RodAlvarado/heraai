@@ -3,7 +3,7 @@ import { GoogleGenAI, Type, Modality } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import { 
   Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, 
-  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, ShieldAlert 
+  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, ShieldAlert, Mail, RefreshCw 
 } from 'lucide-react';
 import { ROLES_BY_CATEGORY } from './roles';
 import { VOICE_SYSTEM_PROMPT } from './systemPrompt';
@@ -21,7 +21,7 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 function MainApp() {
-  const { user, profile, logout, refreshProfile } = useAuth();
+  const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
   
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
@@ -35,6 +35,8 @@ function MainApp() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
+  const [emailNotice, setEmailNotice] = useState<string | null>(null);
+  const [checkingEmail, setCheckingEmail] = useState(false);
 
   // Check URL parameters when returning from Stripe Checkout or Payment Link
   useEffect(() => {
@@ -471,6 +473,52 @@ function MainApp() {
           <button onClick={() => setPaymentNotice(null)} className="ml-3 underline hover:text-emerald-100 font-bold">
             Entendido
           </button>
+        </div>
+      )}
+
+      {/* Unverified Email Warning Banner */}
+      {user && !user.emailVerified && user.providerData?.[0]?.providerId === 'password' && (
+        <div className="bg-amber-500 text-white text-xs font-medium py-2 px-4 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-xs shrink-0">
+          <div className="flex items-center gap-2 text-center sm:text-left">
+            <Mail className="w-4 h-4 shrink-0 hidden sm:block" />
+            <span>
+              Verifica tu correo electrónico (<strong>{user.email}</strong>) para validar tu cuenta.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {emailNotice && <span className="text-[11px] text-amber-100 font-semibold">{emailNotice}</span>}
+            <button
+              onClick={async () => {
+                try {
+                  await sendVerificationEmail();
+                  setEmailNotice('¡Enlace reenviado!');
+                  setTimeout(() => setEmailNotice(null), 4000);
+                } catch (e) {
+                  setEmailNotice('Error al enviar');
+                }
+              }}
+              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 rounded-lg text-white font-semibold text-[11px] transition-colors"
+            >
+              Reenviar correo
+            </button>
+            <button
+              onClick={async () => {
+                setCheckingEmail(true);
+                const verified = await checkEmailVerification();
+                setCheckingEmail(false);
+                if (verified) {
+                  alert('¡Correo verificado con éxito!');
+                } else {
+                  alert('Aún no hemos detectado la confirmación en el enlace. Revisa tu correo y vuelve a pulsar este botón.');
+                }
+              }}
+              disabled={checkingEmail}
+              className="px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-900 font-bold text-[11px] rounded-lg transition-colors flex items-center gap-1"
+            >
+              {checkingEmail && <RefreshCw className="w-3 h-3 animate-spin" />}
+              Ya lo verifiqué
+            </button>
+          </div>
         </div>
       )}
 
