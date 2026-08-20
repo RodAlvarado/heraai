@@ -17,13 +17,7 @@ import { CandidateManagementHub } from './components/CandidateManagementHub';
 import { CandidatePortal } from './components/CandidatePortal';
 import { db } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
-
-// Lazy getter for Gemini SDK to prevent startup crash if API key is missing
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || 
-                 (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
-  return new GoogleGenAI({ apiKey: apiKey || 'dummy-key-placeholder' });
-}
+import { getOrFetchGeminiApiKey, createGeminiClient } from './lib/gemini';
 
 function MainApp() {
   const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
@@ -282,7 +276,9 @@ function MainApp() {
         const base64 = btoa(binary);
         
         sessionPromise.then(session => {
-          session.sendRealtimeInput({ media: { mimeType: 'audio/pcm;rate=16000', data: base64 } });
+          session.sendRealtimeInput({ 
+            mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }] 
+          });
         }).catch(() => {});
       };
       
@@ -333,8 +329,9 @@ function MainApp() {
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
-      const response = await getGeminiClient().models.generateContent({
-        model: 'gemini-3-flash-preview',
+      const apiKey = await getOrFetchGeminiApiKey();
+      const response = await createGeminiClient(apiKey).models.generateContent({
+        model: 'gemini-2.5-flash',
         contents: prompt
       });
       
@@ -407,13 +404,20 @@ function MainApp() {
       isCompletingRef.current = false;
       pendingCompletionArgsRef.current = null;
       isTurnCompleteRef.current = false;
+      
+      const apiKey = await getOrFetchGeminiApiKey();
+      if (!apiKey) {
+        throw new Error("No se encontró la clave de API de Gemini.");
+      }
+
       audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       if (audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
       }
       nextPlayTimeRef.current = audioCtxRef.current.currentTime;
       
-      const sessionPromise = getGeminiClient().live.connect({
+      const aiClient = createGeminiClient(apiKey);
+      const sessionPromise = aiClient.live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         config: {
           responseModalities: [Modality.AUDIO],
@@ -423,7 +427,7 @@ function MainApp() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
-          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nThe candidate is applying for: ${role}. Start the interview now. Introduce yourself briefly and ask the first question.`,
+          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nThe candidate is applying for: ${role}. Start the interview immediately by introducing yourself briefly as HERA and asking the first interview question.`,
           tools: [{
             functionDeclarations: [
               {
@@ -444,11 +448,21 @@ function MainApp() {
         },
         callbacks: {
           onopen: () => {
+            console.log("Main App Live Session Connected!");
             startRecording(sessionPromise);
             
             sessionPromise.then(session => {
               session.sendClientContent({
-                turns: `Hello, I am ready for the ${role} interview. Please introduce yourself as the HR Manager and start the interview. I will be using a push-to-talk button to answer your questions.`,
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: `Hola HERA, estoy listo para iniciar la entrevista para la posición de ${role}. Por favor preséntate y comienza con la primera pregunta.`
+                      }
+                    ]
+                  }
+                ],
                 turnComplete: true
               });
             }).catch(err => console.error("Failed to send initial message:", err));
@@ -501,9 +515,9 @@ function MainApp() {
       
       sessionRef.current = await sessionPromise;
       
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to start interview:", err);
-      alert("Failed to start the voice interview. Please check your microphone permissions.");
+      alert("No se pudo iniciar la entrevista de voz (" + (err?.message || "error de micrófono/conexión") + "). Por favor verifica los permisos.");
       setStep('select_role');
     }
   };

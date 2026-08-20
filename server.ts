@@ -174,6 +174,16 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'HERA SaaS Engine' });
 });
 
+// API: Gemini Runtime Config for Client
+app.get('/api/gemini/config', (req, res) => {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+  res.json({
+    apiKey: apiKey || '',
+    configured: !!apiKey,
+    model: 'gemini-2.5-flash-native-audio-preview-09-2025'
+  });
+});
+
 async function startServer() {
   const distPath = path.join(process.cwd(), 'dist');
   const isProduction = process.env.NODE_ENV === 'production' || fs.existsSync(path.join(distPath, 'index.html'));

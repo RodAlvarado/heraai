@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Type, Modality } from '@google/genai';
+import { Type, Modality } from '@google/genai';
 import { 
   Mic, MicOff, Square, Bot, Briefcase, CheckCircle2, Loader2, Volume2, 
   Sparkles, Building2, User, Mail, ShieldCheck, ArrowRight, AlertCircle 
@@ -8,17 +8,12 @@ import { VOICE_SYSTEM_PROMPT } from '../systemPrompt';
 import { ROLES_BY_CATEGORY } from '../roles';
 import { db } from '../lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
+import { getOrFetchGeminiApiKey, createGeminiClient } from '../lib/gemini';
 
 interface CandidatePortalProps {
   companyUid: string;
   initialRole?: string;
   onExitToMainApp?: () => void;
-}
-
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || 
-                 (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
-  return new GoogleGenAI({ apiKey: apiKey || 'dummy-key-placeholder' });
 }
 
 export const CandidatePortal: React.FC<CandidatePortalProps> = ({ 
@@ -247,7 +242,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         const base64 = btoa(binary);
         
         sessionPromise.then(session => {
-          session.sendRealtimeInput({ media: { mimeType: 'audio/pcm;rate=16000', data: base64 } });
+          session.sendRealtimeInput({ 
+            mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }] 
+          });
         }).catch(() => {});
       };
       
@@ -302,8 +299,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
-      const response = await getGeminiClient().models.generateContent({
-        model: 'gemini-3-flash-preview',
+      const apiKey = await getOrFetchGeminiApiKey();
+      const response = await createGeminiClient(apiKey).models.generateContent({
+        model: 'gemini-2.5-flash',
         contents: prompt
       });
       
@@ -376,13 +374,19 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       pendingCompletionArgsRef.current = null;
       isTurnCompleteRef.current = false;
       
+      const apiKey = await getOrFetchGeminiApiKey();
+      if (!apiKey) {
+        throw new Error("No se encontró la clave de API de Gemini en el servidor.");
+      }
+
       audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       if (audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
       }
       nextPlayTimeRef.current = audioCtxRef.current.currentTime;
       
-      const sessionPromise = getGeminiClient().live.connect({
+      const aiClient = createGeminiClient(apiKey);
+      const sessionPromise = aiClient.live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         config: {
           responseModalities: [Modality.AUDIO],
@@ -392,7 +396,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
-          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nYou are interviewing the candidate: ${firstName.trim()} ${lastName.trim()} for the position of: ${selectedRole}. Start the interview now by greeting them by their first name (${firstName.trim()}) and introducing yourself as HERA, then ask the first question.`,
+          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nYou are interviewing the candidate: ${firstName.trim()} ${lastName.trim()} for the position of: ${selectedRole}. Start the interview immediately by greeting them warmly by their first name (${firstName.trim()}), introducing yourself as HERA, and asking the first interview question.`,
           tools: [{
             functionDeclarations: [
               {
@@ -413,11 +417,21 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         },
         callbacks: {
           onopen: () => {
+            console.log("Candidate Live Session Connected!");
             startRecording(sessionPromise);
             
             sessionPromise.then(session => {
               session.sendClientContent({
-                turns: `Hello, I am ${firstName.trim()} ${lastName.trim()} and I am ready for the ${selectedRole} interview. Please introduce yourself and start the interview. I will be using a push-to-talk button to answer your questions.`,
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: `Hola HERA, soy ${firstName.trim()} ${lastName.trim()} y estoy listo para iniciar mi entrevista de evaluación para el puesto de ${selectedRole}. Por favor salúdame por mi nombre, preséntate brevemente y hazme la primera pregunta.`
+                      }
+                    ]
+                  }
+                ],
                 turnComplete: true
               });
             }).catch(err => console.error("Failed to send initial candidate message:", err));
@@ -470,9 +484,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       
       sessionRef.current = await sessionPromise;
       
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to start candidate interview:", err);
-      alert("No se pudo iniciar la llamada de voz. Por favor verifica los permisos de micrófono.");
+      alert("No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y recarga la página.");
       setStep('form');
     }
   };
