@@ -20,16 +20,29 @@ import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from '
 
 // Lazy getter for Gemini SDK to prevent startup crash if API key is missing
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+  const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || 
+                 (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
   return new GoogleGenAI({ apiKey: apiKey || 'dummy-key-placeholder' });
 }
 
 function MainApp() {
   const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
   
-  // URL Param for Candidate Invitation Link
-  const [candidateInviteUid, setCandidateInviteUid] = useState<string | null>(null);
-  const [candidateInviteRole, setCandidateInviteRole] = useState<string | null>(null);
+  // URL Param for Candidate Invitation Link (Synchronous initialization to prevent blank screen)
+  const [candidateInviteUid, setCandidateInviteUid] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('invite');
+    }
+    return null;
+  });
+  const [candidateInviteRole, setCandidateInviteRole] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('role');
+    }
+    return null;
+  });
 
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
@@ -48,6 +61,9 @@ function MainApp() {
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
   const [emailNotice, setEmailNotice] = useState<string | null>(null);
   const [checkingEmail, setCheckingEmail] = useState(false);
+
+  // Track start time of current interview to filter out tests < 10 seconds
+  const interviewStartTimeRef = useRef<number | null>(null);
 
   // Check URL parameters when mounted
   useEffect(() => {
@@ -282,6 +298,11 @@ function MainApp() {
   const handleInterviewComplete = async (args: any) => {
     setStep('generating_report');
     cleanupAudio();
+
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+    const isShortInterview = durationSeconds < 10;
     
     try {
       const prompt = `Based on the following interview summary, generate a formal Candidate Evaluation Report in Markdown format.
@@ -331,17 +352,23 @@ function MainApp() {
             score: args?.recommended_score || 0,
             redFlags: args?.red_flags || 0,
             summary: args?.candidate_summary || '',
+            durationSeconds,
+            isShortInterview,
             createdAt: serverTimestamp()
           });
 
-          // Increment interview count in user document
-          const userRef = doc(db, 'users', user.uid);
-          await updateDoc(userRef, {
-            interviewsCount: increment(1)
-          });
+          // Only increment interview count in user document if interview was 10 seconds or longer!
+          if (!isShortInterview) {
+            const userRef = doc(db, 'users', user.uid);
+            await updateDoc(userRef, {
+              interviewsCount: increment(1)
+            });
 
-          // Refresh profile so React state updates immediately
-          await refreshProfile();
+            // Refresh profile so React state updates immediately
+            await refreshProfile();
+          } else {
+            setPaymentNotice(`ℹ️ La entrevista duró ${durationSeconds} segundos (< 10s). No se ha descontado de tu límite de evaluaciones.`);
+          }
         } catch (dbErr) {
           console.error("Failed to save interview record to Firestore:", dbErr);
         }
@@ -374,6 +401,7 @@ function MainApp() {
 
     setSelectedRole(role);
     setStep('interview');
+    interviewStartTimeRef.current = Date.now();
     
     try {
       isCompletingRef.current = false;
@@ -481,6 +509,17 @@ function MainApp() {
   };
 
   const endInterviewEarly = () => {
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+
+    if (durationSeconds < 10) {
+      cleanupAudio();
+      setPaymentNotice(`⚠️ La entrevista duró menos de 10 segundos (${durationSeconds}s). No se ha descontado de tu límite de evaluaciones.`);
+      setStep('select_role');
+      return;
+    }
+
     handleInterviewComplete({
       candidate_summary: "The interview was ended early by the user.",
       recommended_score: 0,

@@ -16,7 +16,8 @@ interface CandidatePortalProps {
 }
 
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+  const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) || 
+                 (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
   return new GoogleGenAI({ apiKey: apiKey || 'dummy-key-placeholder' });
 }
 
@@ -39,6 +40,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
   const [companyName, setCompanyName] = useState<string>('Empresa Reclutadora');
   const [loadingCompany, setLoadingCompany] = useState(true);
 
+  // Track start time of current interview to filter out tests < 10 seconds
+  const interviewStartTimeRef = useRef<number | null>(null);
+
   // Audio & Voice state
   const [isRecording, setIsRecording] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
@@ -56,37 +60,59 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
   // Load company information & check quota and corporate plan status
   useEffect(() => {
+    let isMounted = true;
+
     async function fetchCompany() {
       try {
         const companyDoc = await getDoc(doc(db, 'users', companyUid));
+        if (!isMounted) return;
+
         if (companyDoc.exists()) {
           const data = companyDoc.data();
           setCompanyName(data.displayName || data.email?.split('@')[0] || 'Empresa Reclutadora');
           
           // Verify that company has an active corporate subscription
-          const isRodrigoDev = data.email?.toLowerCase() === 'rodrigoalto25@gmail.com';
+          const isRodrigoDev = data.email?.toLowerCase() === 'rodrigoalto25@gmail.com' || companyUid === 'MofrK18CvYXsecnf8a6WynBeJWN2';
           const isCorp = isRodrigoDev || (data.subscriptionStatus === 'active' && data.subscriptionPlan === 'corp');
+          
           if (!isCorp) {
             setStep('not_corporate');
             return;
           }
 
           const count = data.interviewsCount || 0;
-          const limit = data.interviewsLimit || 100;
+          const limit = data.interviewsLimit || (isRodrigoDev ? 100 : 20);
           
           if (count >= limit) {
             setStep('quota_exhausted');
           }
         } else {
-          setStep('not_corporate');
+          // If document not found in Firestore yet, check if it's the known dev account or fallback
+          if (companyUid === 'MofrK18CvYXsecnf8a6WynBeJWN2') {
+            setCompanyName('HERA Talent Team');
+            // Allowed for testing
+          } else {
+            setStep('not_corporate');
+          }
         }
       } catch (err) {
         console.warn('Could not read company profile from Firestore:', err);
+        // If it's a known tester UID, allow testing
+        if (companyUid === 'MofrK18CvYXsecnf8a6WynBeJWN2') {
+          setCompanyName('HERA Talent Team');
+        }
       } finally {
-        setLoadingCompany(false);
+        if (isMounted) {
+          setLoadingCompany(false);
+        }
       }
     }
+
     fetchCompany();
+
+    return () => {
+      isMounted = false;
+    };
   }, [companyUid]);
 
   const toggleAnswering = () => {
@@ -239,6 +265,10 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
     cleanupAudio();
     
     const candidateFullName = `${firstName.trim()} ${lastName.trim()}`;
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+    const isShortInterview = durationSeconds < 10;
 
     try {
       const prompt = `Based on the following interview summary, generate a formal Candidate Evaluation Report in Markdown format.
@@ -291,17 +321,21 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
           score: args?.recommended_score || 0,
           redFlags: args?.red_flags || 0,
           summary: args?.candidate_summary || '',
+          durationSeconds,
+          isShortInterview,
           createdAt: serverTimestamp()
         });
 
-        // Increment company's interview count
-        try {
-          const companyRef = doc(db, 'users', companyUid);
-          await updateDoc(companyRef, {
-            interviewsCount: increment(1)
-          });
-        } catch (incErr) {
-          console.warn("Could not increment count directly:", incErr);
+        // Increment company's interview count ONLY if interview was >= 10 seconds!
+        if (!isShortInterview) {
+          try {
+            const companyRef = doc(db, 'users', companyUid);
+            await updateDoc(companyRef, {
+              interviewsCount: increment(1)
+            });
+          } catch (incErr) {
+            console.warn("Could not increment count directly:", incErr);
+          }
         }
       } catch (dbErr) {
         console.error("Failed to save interview record:", dbErr);
@@ -335,6 +369,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
     }
 
     setStep('interview');
+    interviewStartTimeRef.current = Date.now();
 
     try {
       isCompletingRef.current = false;
@@ -443,6 +478,17 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
   };
 
   const endInterviewEarly = () => {
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+
+    if (durationSeconds < 10) {
+      cleanupAudio();
+      setFormError(`⚠️ La entrevista duró menos de 10 segundos (${durationSeconds}s). No se ha consumido del cupo de evaluaciones de la empresa.`);
+      setStep('form');
+      return;
+    }
+
     handleInterviewComplete({
       candidate_summary: "La entrevista fue terminada anticipadamente por el candidato.",
       recommended_score: 0,
@@ -481,8 +527,17 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       {/* Main Form or Voice Interview */}
       <main className="flex-1 flex flex-col items-center justify-center p-4 md:p-6 max-w-2xl mx-auto w-full">
         
+        {/* Loading Company State */}
+        {loadingCompany && (
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 text-center max-w-md w-full flex flex-col items-center justify-center">
+            <Loader2 className="w-8 h-8 text-indigo-600 animate-spin mb-3" />
+            <h3 className="text-sm font-bold text-slate-800 mb-1">Cargando evaluación...</h3>
+            <p className="text-xs text-slate-500">Verificando enlace de candidato oficial</p>
+          </div>
+        )}
+
         {/* State: Not Corporate or Invalid */}
-        {step === 'not_corporate' && (
+        {!loadingCompany && step === 'not_corporate' && (
           <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 text-center max-w-md w-full">
             <div className="w-14 h-14 bg-red-50 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-red-200 text-red-600">
               <AlertCircle className="w-7 h-7" />
@@ -503,7 +558,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         )}
 
         {/* State: Quota Exhausted */}
-        {step === 'quota_exhausted' && (
+        {!loadingCompany && step === 'quota_exhausted' && (
           <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 text-center max-w-md w-full">
             <div className="w-14 h-14 bg-amber-50 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-amber-200 text-amber-600">
               <AlertCircle className="w-7 h-7" />
@@ -524,7 +579,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         )}
 
         {/* State: Form Registration */}
-        {step === 'form' && (
+        {!loadingCompany && step === 'form' && (
           <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 md:p-8 w-full">
             <div className="text-center mb-6">
               <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-2 border border-indigo-100">

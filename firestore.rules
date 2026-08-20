@@ -13,8 +13,10 @@ service cloud.firestore {
 
     // User profiles
     match /users/{userId} {
-      allow read: if isOwner(userId) || resource.data.subscriptionStatus == 'active';
-      allow create, update: if isOwner(userId);
+      allow read: if true;
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || 
+                       (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['interviewsCount']));
     }
 
     // Interviews
