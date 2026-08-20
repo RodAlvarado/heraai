@@ -53,6 +53,8 @@ export interface InterviewRecord {
   userId: string;
   role: string;
   candidateName?: string;
+  candidateEmail?: string;
+  isCandidateInvite?: boolean;
   report: string;
   score: number;
   redFlags: number;
@@ -62,12 +64,32 @@ export interface InterviewRecord {
 
 // Get or initialize user profile document in Firestore
 export async function syncUserProfile(user: User): Promise<UserProfile> {
+  const isRodrigoDev = user.email?.toLowerCase() === 'rodrigoalto25@gmail.com';
+
   try {
     const userRef = doc(db, 'users', user.uid);
     const userSnap = await getDoc(userRef);
 
     if (userSnap.exists()) {
       const data = userSnap.data() as UserProfile;
+      
+      // Auto-grant Corporate Plan to developer/tester account
+      if (isRodrigoDev && (data.subscriptionPlan !== 'corp' || data.subscriptionStatus !== 'active')) {
+        data.subscriptionStatus = 'active';
+        data.subscriptionPlan = 'corp';
+        data.interviewsLimit = 100;
+        try {
+          await updateDoc(userRef, {
+            subscriptionStatus: 'active',
+            subscriptionPlan: 'corp',
+            interviewsLimit: 100,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (updateErr) {
+          console.warn("Could not update Firestore profile with corp plan:", updateErr);
+        }
+      }
+
       if (data.interviewsLimit === undefined) {
         data.interviewsLimit = data.subscriptionStatus === 'active' 
           ? (data.subscriptionPlan === 'basic' ? 5 : data.subscriptionPlan === 'corp' ? 100 : 20)
@@ -84,9 +106,10 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
       email: user.email || '',
       displayName: user.displayName || user.email?.split('@')[0] || 'Usuario',
       photoURL: user.photoURL || '',
-      subscriptionStatus: 'free_trial',
+      subscriptionStatus: isRodrigoDev ? 'active' : 'free_trial',
+      subscriptionPlan: isRodrigoDev ? 'corp' : undefined,
       interviewsCount: 0,
-      interviewsLimit: 2, // 2 free trial interviews
+      interviewsLimit: isRodrigoDev ? 100 : 2, // 100 for Corp / 2 for free trial
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -100,9 +123,10 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
       email: user.email || '',
       displayName: user.displayName || user.email?.split('@')[0] || 'Usuario',
       photoURL: user.photoURL || '',
-      subscriptionStatus: 'free_trial',
+      subscriptionStatus: isRodrigoDev ? 'active' : 'free_trial',
+      subscriptionPlan: isRodrigoDev ? 'corp' : undefined,
       interviewsCount: 0,
-      interviewsLimit: 2,
+      interviewsLimit: isRodrigoDev ? 100 : 2,
     };
   }
 }

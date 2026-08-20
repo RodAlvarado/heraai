@@ -46,14 +46,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(userDoc);
     } catch (err) {
       console.error("Error fetching user profile, applying fallback profile:", err);
+      const isRodrigoDev = currentUser.email?.toLowerCase() === 'rodrigoalto25@gmail.com';
       setProfile({
         uid: currentUser.uid,
         email: currentUser.email || '',
         displayName: currentUser.displayName || currentUser.email?.split('@')[0] || 'Usuario',
         photoURL: currentUser.photoURL || '',
-        subscriptionStatus: 'free_trial',
+        subscriptionStatus: isRodrigoDev ? 'active' : 'free_trial',
+        subscriptionPlan: isRodrigoDev ? 'corp' : undefined,
         interviewsCount: 0,
-        interviewsLimit: 2,
+        interviewsLimit: isRodrigoDev ? 100 : 2,
       });
     }
   };

@@ -3,7 +3,8 @@ import { GoogleGenAI, Type, Modality } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import { 
   Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, 
-  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, ShieldAlert, Mail, RefreshCw 
+  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, 
+  ShieldAlert, Mail, RefreshCw, Link2, Users, Building2, Share2 
 } from 'lucide-react';
 import { ROLES_BY_CATEGORY } from './roles';
 import { VOICE_SYSTEM_PROMPT } from './systemPrompt';
@@ -11,6 +12,9 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { AuthModal } from './components/AuthModal';
 import { PricingModal } from './components/PricingModal';
 import { InterviewHistory } from './components/InterviewHistory';
+import { CompanyInviteModal } from './components/CompanyInviteModal';
+import { CandidateManagementHub } from './components/CandidateManagementHub';
+import { CandidatePortal } from './components/CandidatePortal';
 import { db } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
 
@@ -23,6 +27,10 @@ function getGeminiClient(): GoogleGenAI {
 function MainApp() {
   const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
   
+  // URL Param for Candidate Invitation Link
+  const [candidateInviteUid, setCandidateInviteUid] = useState<string | null>(null);
+  const [candidateInviteRole, setCandidateInviteRole] = useState<string | null>(null);
+
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
   const [reportContent, setReportContent] = useState<string | null>(null);
@@ -33,14 +41,26 @@ function MainApp() {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isPricingOpen, setIsPricingOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  const [inviteRoleForModal, setInviteRoleForModal] = useState<string>('SEO Specialist');
+  const [isCandidateHubOpen, setIsCandidateHubOpen] = useState(false);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
   const [emailNotice, setEmailNotice] = useState<string | null>(null);
   const [checkingEmail, setCheckingEmail] = useState(false);
 
-  // Check URL parameters when returning from Stripe Checkout or Payment Link
+  // Check URL parameters when mounted
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
+    const inviteParam = urlParams.get('invite');
+    const roleParam = urlParams.get('role');
+    
+    if (inviteParam) {
+      setCandidateInviteUid(inviteParam);
+      if (roleParam) setCandidateInviteRole(roleParam);
+      return;
+    }
+
     const sessionId = urlParams.get('session_id');
     const paymentSuccess = urlParams.get('payment') === 'success' || urlParams.get('payment_success') === 'true' || urlParams.get('success') === 'true';
     const planFromUrl = (urlParams.get('plan') as 'basic' | 'pro' | 'corp') || 'pro';
@@ -89,6 +109,19 @@ function MainApp() {
         });
     }
   }, [user]);
+
+  // If candidate is visiting via invite link, render candidate portal immediately
+  if (candidateInviteUid) {
+    return (
+      <CandidatePortal 
+        companyUid={candidateInviteUid} 
+        initialRole={candidateInviteRole || undefined}
+        onExitToMainApp={() => {
+          window.location.href = window.location.pathname;
+        }}
+      />
+    );
+  }
 
   const isAnsweringRef = useRef(false);
   const isCompletingRef = useRef(false);
@@ -523,7 +556,7 @@ function MainApp() {
       )}
 
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
+      <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-slate-50 border border-slate-100 shadow-sm">
             <img src="/logo.png" alt="HERA Logo" className="w-full h-full object-cover" onError={(e) => {
@@ -533,25 +566,25 @@ function MainApp() {
           </div>
           <div>
             <h1 className="font-bold text-lg tracking-tight text-slate-900 flex items-center gap-2">
-              HERA <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold border border-indigo-100">SaaS</span>
+              HERA <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold border border-indigo-100">SaaS ATS</span>
             </h1>
             <p className="text-[11px] text-slate-400 hidden sm:block">Human Evaluation & Recruitment AI</p>
           </div>
         </div>
 
         {/* Header Right Actions */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {/* Subscription Status Pill */}
           <button
             onClick={() => setIsPricingOpen(true)}
-            className={`flex items-center gap-1.5 text-xs font-semibold px-3.5 py-1.5 rounded-full border transition-all ${
+            className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
               profile?.subscriptionStatus === 'active' 
                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
                 : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
             }`}
           >
             <Zap className="w-3.5 h-3.5 shrink-0" />
-            <span>
+            <span className="hidden md:inline">
               {profile?.subscriptionStatus === 'active' ? (
                 `${profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile.interviewsCount || 0}/${userLimit})`
               ) : user ? (
@@ -560,17 +593,46 @@ function MainApp() {
                 'Planes & Precios'
               )}
             </span>
+            <span className="md:hidden">
+              {profile?.subscriptionStatus === 'active' ? `${profile.interviewsCount || 0}/${userLimit}` : 'Planes'}
+            </span>
           </button>
 
           {/* User Auth Section */}
           {user ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              {/* Recruiter / ATS Candidate Hub - Corporate Plan Exclusive */}
+              {profile?.subscriptionStatus === 'active' && profile?.subscriptionPlan === 'corp' && (
+                <>
+                  <button
+                    onClick={() => setIsCandidateHubOpen(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+                    title="Panel de Candidatos & ATS"
+                  >
+                    <Users className="w-3.5 h-3.5 text-indigo-400" />
+                    <span className="hidden sm:inline">Panel Candidatos</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setInviteRoleForModal('SEO Specialist');
+                      setIsInviteModalOpen(true);
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-semibold transition-colors"
+                    title="Generar Enlace para Candidatos"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Invitar</span>
+                  </button>
+                </>
+              )}
+
               <button
                 onClick={() => setIsHistoryOpen(true)}
                 className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
                 title="Historial de Entrevistas"
               >
-                <History className="w-5 h-5" />
+                <History className="w-4 h-4" />
               </button>
 
               <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
@@ -607,19 +669,61 @@ function MainApp() {
         
         {/* Step 1: Role Selection */}
         {step === 'select_role' && (
-          <div className="flex-1 flex flex-col items-center justify-center max-w-3xl mx-auto w-full py-6 overflow-y-auto">
-            <div className="text-center mb-8">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-3 border border-indigo-100">
+          <div className="flex-1 flex flex-col items-center justify-center max-w-3xl mx-auto w-full py-4 overflow-y-auto">
+            <div className="text-center mb-6">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-2 border border-indigo-100">
                 <Sparkles className="w-3.5 h-3.5" />
                 Plataforma de Entrevistas de Voz con IA
               </div>
-              <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 mb-3">
-                Practica tus entrevistas con HERA, tu reclutadora de IA
+              <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 mb-2">
+                Practica tus entrevistas con HERA
               </h2>
               <p className="text-sm md:text-base text-slate-600 max-w-xl mx-auto">
-                Selecciona el puesto, realiza la entrevista y te entrega un reporte completo sobre tu feedback
+                Selecciona el puesto, realiza la entrevista de voz y recibe un reporte detallado con feedback, puntaje técnico y red flags detectadas.
               </p>
             </div>
+
+            {/* Corporate Plan Active Banner (Only visible when user has an active Corporate Plan) */}
+            {profile?.subscriptionStatus === 'active' && profile?.subscriptionPlan === 'corp' && (
+              <div className="w-full bg-linear-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-5 md:p-6 mb-6 shadow-md flex flex-col md:flex-row items-center justify-between gap-4 border border-slate-800 animate-in fade-in">
+                <div className="flex items-center gap-4 text-center md:text-left">
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0 mx-auto md:mx-0">
+                    <Building2 className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm md:text-base flex items-center justify-center md:justify-start gap-2">
+                      Plan Corporativo Activo
+                      <span className="text-[10px] bg-emerald-500/30 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-500/40">
+                        Empresa
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Genera enlaces únicos para tus candidatos o revisa sus respuestas y reportes en el panel ATS.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 shrink-0">
+                  <button
+                    onClick={() => {
+                      setInviteRoleForModal('SEO Specialist');
+                      setIsInviteModalOpen(true);
+                    }}
+                    className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Link2 className="w-4 h-4" />
+                    Generar Enlace
+                  </button>
+                  <button
+                    onClick={() => setIsCandidateHubOpen(true)}
+                    className="px-3.5 py-2.5 bg-white/10 hover:bg-white/20 text-slate-200 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Users className="w-4 h-4" />
+                    Ver ATS
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 w-full max-h-[58vh] overflow-y-auto">
               <h3 className="font-bold text-slate-900 mb-6 flex items-center justify-between sticky top-0 bg-white z-10 pb-3 border-b border-slate-100">
@@ -637,14 +741,33 @@ function MainApp() {
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">{category}</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {roles.map(role => (
-                        <button
+                        <div
                           key={role}
-                          onClick={() => startInterview(role)}
-                          className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/40 transition-all text-left group shadow-2xs"
+                          className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/40 transition-all group shadow-2xs bg-white"
                         >
-                          <span className="font-semibold text-xs text-slate-800 group-hover:text-indigo-700">{role}</span>
-                          <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600 transition-transform group-hover:translate-x-0.5" />
-                        </button>
+                          <button
+                            onClick={() => startInterview(role)}
+                            className="flex-1 text-left flex items-center justify-between"
+                          >
+                            <span className="font-semibold text-xs text-slate-800 group-hover:text-indigo-700">{role}</span>
+                            <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600 transition-transform group-hover:translate-x-0.5" />
+                          </button>
+                          
+                          {/* Corporate only: Quick Invite Button */}
+                          {profile?.subscriptionStatus === 'active' && profile?.subscriptionPlan === 'corp' && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setInviteRoleForModal(role);
+                                setIsInviteModalOpen(true);
+                              }}
+                              className="ml-2 p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-100/60 rounded-xl transition-colors shrink-0"
+                              title={`Generar enlace de invitación para ${role}`}
+                            >
+                              <Link2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       ))}
                     </div>
                   </div>
@@ -781,10 +904,23 @@ function MainApp() {
         )}
       </main>
 
-      {/* SaaS Modals */}
+      {/* SaaS & ATS Modals */}
       <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} />
       <PricingModal isOpen={isPricingOpen} onClose={() => setIsPricingOpen(false)} />
       <InterviewHistory isOpen={isHistoryOpen} onClose={() => setIsHistoryOpen(false)} />
+      <CompanyInviteModal 
+        isOpen={isInviteModalOpen} 
+        onClose={() => setIsInviteModalOpen(false)} 
+        defaultRole={inviteRoleForModal} 
+      />
+      <CandidateManagementHub 
+        isOpen={isCandidateHubOpen} 
+        onClose={() => setIsCandidateHubOpen(false)} 
+        onOpenInviteModal={() => {
+          setIsCandidateHubOpen(false);
+          setIsInviteModalOpen(true);
+        }}
+      />
     </div>
   );
 }

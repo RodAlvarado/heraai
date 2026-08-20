@@ -371,8 +371,9 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   Tu Plan Actual
                 </div>
               ) : (
-                <div className="absolute -top-3 right-4 bg-slate-800 border border-slate-700 text-slate-200 text-[10px] font-bold px-3 py-0.5 rounded-full uppercase tracking-wider">
-                  Equipos
+                <div className="absolute -top-3 right-4 bg-indigo-600 text-white text-[10px] font-bold px-3 py-0.5 rounded-full uppercase tracking-wider shadow-sm flex items-center gap-1">
+                  <Sparkles className="w-3 h-3" />
+                  Empresas & ATS
                 </div>
               )}
 
@@ -381,7 +382,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   <Building2 className="w-4 h-4 text-indigo-400" />
                   Plan Corporativo
                 </div>
-                <p className="text-[11px] text-slate-400 mb-4">Diseñado para empresas y departamentos de reclutamiento intensivo.</p>
+                <p className="text-[11px] text-slate-400 mb-4">Diseñado para empresas y departamentos de reclutamiento que evalúan candidatos externos.</p>
 
                 <div className="flex items-baseline gap-1 mb-4 pb-4 border-b border-slate-800">
                   <span className="text-3xl font-extrabold text-white">$99.99</span>
@@ -393,25 +394,29 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </div>
 
                 <ul className="space-y-2.5 text-xs text-slate-300 mb-6">
+                  <li className="flex items-center gap-2 font-semibold text-emerald-400">
+                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Enlaces de Invitación únicos para Candidatos</span>
+                  </li>
+                  <li className="flex items-center gap-2 font-semibold text-emerald-400">
+                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Panel ATS & Exportación de Candidatos a CSV</span>
+                  </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
                     <span>100 Evaluaciones de Voz / mes</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span>Acceso multi-reclutador para equipos</span>
+                    <span>Catálogo completo con 30+ roles técnicos</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span>Catálogo completo con 30+ roles</span>
+                    <span>Reportes ejecutivos con Score y Red Flags</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span>Reportes ejecutivos avanzados</span>
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span>Gestor de cuenta y soporte 24/7</span>
+                    <span>Gestor de cuenta y soporte prioritario 24/7</span>
                   </li>
                 </ul>
               </div>

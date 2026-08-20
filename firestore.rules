@@ -13,14 +13,15 @@ service cloud.firestore {
 
     // User profiles
     match /users/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || resource.data.subscriptionStatus == 'active';
       allow create, update: if isOwner(userId);
     }
 
     // Interviews
     match /interviews/{interviewId} {
       allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow create: if (isAuthenticated() && request.resource.data.userId == request.auth.uid) ||
+                      (request.resource.data.isCandidateInvite == true && request.resource.data.userId is string);
       allow update, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
   }
