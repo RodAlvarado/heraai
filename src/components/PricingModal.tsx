@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Check, Zap, CreditCard, Shield, X, AlertCircle, Building2, User, Sparkles, UserMinus } from 'lucide-react';
-import { db } from '../lib/firebase';
+import { Check, Zap, CreditCard, Shield, X, AlertCircle, Building2, User, Sparkles, UserMinus, Calendar, RefreshCw } from 'lucide-react';
+import { db, isUserSubscriptionActive, getExpiresAtMillis } from '../lib/firebase';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 
 interface PricingModalProps {
@@ -28,13 +28,24 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
   if (!isOpen) return null;
 
   const currentPlan = profile?.subscriptionPlan;
-  const isSubscribed = profile?.subscriptionStatus === 'active';
+  const isSubscribed = isUserSubscriptionActive(profile);
+  const isPastDue = profile?.subscriptionStatus === 'past_due' || (!isSubscribed && !!profile?.subscriptionPlan);
   const currentLimit = profile?.interviewsLimit ?? (isSubscribed ? (currentPlan === 'basic' ? 5 : currentPlan === 'corp' ? 100 : 20) : 2);
-  const isLimitReached = (profile?.interviewsCount || 0) >= currentLimit;
+  const interviewsUsed = profile?.interviewsCount || 0;
+  const interviewsRemaining = Math.max(0, currentLimit - interviewsUsed);
+  const isLimitReached = interviewsUsed >= currentLimit;
+
+  // Format expiration or next billing date
+  const expiresMs = getExpiresAtMillis(profile?.subscriptionExpiresAt);
+  const billingDateStr = expiresMs ? new Date(expiresMs).toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
+  }) : null;
 
   const STRIPE_PAYMENT_LINKS = {
     basic: 'https://buy.stripe.com/bJe14p5067rd9qDf6r2cg01',
-    pro: 'https://buy.stripe.com/aFaeVf78efXJ9qD6zV2cg02',
+    pro: 'https://buy.stripe.com/28EfZjfEK5j5byLaQb2cg04',
     corp: 'https://buy.stripe.com/cNi9AVeAGaDp1Yb8I32cg03',
   };
 
@@ -46,28 +57,6 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
 
     setLoadingPlan(planKey);
     setNotice(null);
-
-    // Try dynamic server session first if configured, else use exact Stripe Payment Links provided
-    try {
-      const response = await fetch('/api/stripe/create-checkout-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.uid,
-          userEmail: user.email,
-          planKey,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (data.url) {
-        window.location.href = data.url;
-        return;
-      }
-    } catch (err) {
-      console.warn('Backend checkout creation skipped, redirecting directly to Stripe Payment Link');
-    }
 
     // Direct Stripe Payment Link with user metadata appended
     const baseUrl = STRIPE_PAYMENT_LINKS[planKey];
@@ -166,19 +155,43 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 <p>{notice}</p>
               </div>
             </div>
+          ) : isPastDue ? (
+            <div className="mb-6 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold mb-0.5 text-sm">Tu mensualidad de HERA ha vencido</p>
+                  <p className="text-rose-700">
+                    Para seguir usando la plataforma y mantener activas tus evaluaciones acumuladas ({interviewsUsed}/{currentLimit}), valida y renueva tu pago mensual. ¡Tus evaluaciones acumuladas no se pierden y se mantendrán disponibles!
+                  </p>
+                  {billingDateStr && (
+                    <p className="text-[11px] text-rose-500 mt-1">
+                      Ciclo anterior vencido el: {billingDateStr}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => handleSubscribe(currentPlan || 'pro')}
+                disabled={loadingPlan !== null}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs shrink-0 cursor-pointer transition-all"
+              >
+                {loadingPlan ? 'Redirigiendo...' : 'Renovar Mensualidad'}
+              </button>
+            </div>
           ) : isLimitReached ? (
             <div className="mb-6 p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               <div>
-                <p className="font-semibold mb-0.5">Límite de Evaluaciones Alcanzado ({profile?.interviewsCount || 0}/{currentLimit})</p>
-                <p>Has alcanzado el límite de evaluaciones de tu plan actual. Selecciona un plan a continuación para continuar realizando entrevistas.</p>
+                <p className="font-semibold mb-0.5">Límite de Evaluaciones Alcanzado ({interviewsUsed}/{currentLimit})</p>
+                <p>Has alcanzado el límite de evaluaciones acumuladas de tu plan. Suscríbete o renueva para añadir nuevas evaluaciones a tu cuenta acumulativa.</p>
               </div>
             </div>
           ) : null}
 
           {/* Active Subscription Banner with Unsubscribe button on right */}
           {isSubscribed && (
-            <div className="mb-6 p-4 rounded-2xl bg-emerald-50/40 border border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="mb-6 p-4 rounded-2xl bg-emerald-50/50 border border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-4">
               <div className="flex items-center gap-3 w-full sm:w-auto">
                 <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold shrink-0">
                   <Zap className="w-5 h-5" />
@@ -189,11 +202,18 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                       Suscripción Activa: {currentPlan === 'basic' ? 'Plan Básico' : currentPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'}
                     </p>
                     <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                      Activo
+                      Activo & Validado
+                    </span>
+                    <span className="bg-indigo-100 text-indigo-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                      Acumulativo
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-500">
-                    Has utilizado {profile?.interviewsCount || 0} de {currentLimit} evaluaciones este mes.
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    Tienes <strong>{interviewsRemaining}</strong> evaluaciones disponibles para usar ({interviewsUsed} utilizadas de {currentLimit} acumuladas).
+                    {billingDateStr ? ` • Próxima renovación mensual: ${billingDateStr}.` : ''}
+                  </p>
+                  <p className="text-[10px] text-emerald-700 font-medium mt-0.5">
+                    ✨ Tus evaluaciones no utilizadas no se reinician; se acumulan mes a mes.
                   </p>
                 </div>
               </div>
@@ -230,7 +250,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   <User className="w-4 h-4 text-slate-500" />
                   Plan Básico
                 </div>
-                <p className="text-[11px] text-slate-500 mb-4">Ideal para pequeños reclutadores o si estas buscando trabajo en empresas americanas de forma sencilla.</p>
+                <p className="text-[11px] text-slate-500 mb-4">Ideal para pequeños reclutadores o si estás buscando trabajo en empresas americanas de forma sencilla.</p>
 
                 <div className="flex items-baseline gap-1 mb-4 pb-4 border-b border-slate-100">
                   <span className="text-3xl font-extrabold text-slate-900">$9.99</span>
@@ -238,13 +258,17 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </div>
 
                 <div className="bg-slate-50 rounded-xl p-3 text-center mb-5 border border-slate-100">
-                  <span className="text-xs font-bold text-slate-800">Hasta 5 entrevistas mensuales</span>
+                  <span className="text-xs font-bold text-slate-800">+5 entrevistas acumulativas / mes</span>
                 </div>
 
                 <ul className="space-y-2.5 text-xs text-slate-600 mb-6">
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-emerald-500 shrink-0" />
-                    <span>5 Evaluaciones de Voz / mes</span>
+                    <span><strong>5 Evaluaciones de Voz / mes</strong> (Acumulativas)</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>Saldo acumulativo: no se pierde a fin de mes</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-emerald-500 shrink-0" />
@@ -280,7 +304,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   disabled={loadingPlan !== null || cancelingSubscription}
                   className="w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs bg-slate-900 hover:bg-slate-800 text-white cursor-pointer"
                 >
-                  {loadingPlan === 'basic' ? 'Procesando...' : 'Seleccionar Plan Básico'}
+                  {loadingPlan === 'basic' ? 'Procesando...' : isPastDue && currentPlan === 'basic' ? 'Reactivar Mensualidad ($9.99)' : 'Seleccionar Plan Básico'}
                 </button>
               )}
             </div>
@@ -297,25 +321,38 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
               </div>
 
               <div>
-                <div className="flex items-center gap-2 text-indigo-900 font-bold text-base mb-1">
-                  <Zap className="w-4 h-4 text-indigo-600" />
-                  Plan Pro
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2 text-indigo-900 font-bold text-base">
+                    <Zap className="w-4 h-4 text-indigo-600" />
+                    Plan Pro
+                  </div>
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                    Acumulativo
+                  </span>
                 </div>
-                <p className="text-[11px] text-slate-500 mb-4">Para consultores de RRHH o estas postulando de forma constante a entrevistas para encontrar trabajos remotos en USA.</p>
+                <p className="text-[11px] text-slate-500 mb-4">Para consultores de RRHH o si estás postulando de forma constante a entrevistas para encontrar trabajos remotos en USA.</p>
 
                 <div className="flex items-baseline gap-1 mb-4 pb-4 border-b border-indigo-100">
-                  <span className="text-4xl font-extrabold text-slate-900">$29.99</span>
+                  <span className="text-4xl font-extrabold text-slate-900">$14.99</span>
                   <span className="text-slate-500 text-xs font-medium">USD / mes</span>
                 </div>
 
                 <div className="bg-indigo-100/60 rounded-xl p-3 text-center mb-5 border border-indigo-200/60">
-                  <span className="text-xs font-extrabold text-indigo-900">Hasta 20 entrevistas mensuales</span>
+                  <span className="text-xs font-extrabold text-indigo-900">+20 entrevistas acumulativas mensuales</span>
                 </div>
 
                 <ul className="space-y-2.5 text-xs text-slate-700 mb-6">
                   <li className="flex items-center gap-2 font-medium">
                     <Check className="w-4 h-4 text-indigo-600 shrink-0" />
-                    <span>20 Evaluaciones de Voz / mes</span>
+                    <span><strong>20 Evaluaciones de Voz / mes</strong></span>
+                  </li>
+                  <li className="flex items-center gap-2 font-semibold text-emerald-700">
+                    <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span><strong>100% Acumulativas:</strong> no caducan ni se reinician</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <span>Validación mensual de suscripción vía Stripe</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-600 shrink-0" />
@@ -355,7 +392,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   disabled={loadingPlan !== null || cancelingSubscription}
                   className="w-full py-3 px-4 font-bold text-xs rounded-xl transition-all shadow-md bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200 cursor-pointer"
                 >
-                  {loadingPlan === 'pro' ? 'Procesando...' : 'Seleccionar Plan Pro'}
+                  {loadingPlan === 'pro' ? 'Procesando...' : isPastDue && currentPlan === 'pro' ? 'Reactivar Mensualidad Pro ($14.99)' : 'Seleccionar Plan Pro ($14.99 USD)'}
                 </button>
               )}
             </div>
@@ -390,7 +427,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                 </div>
 
                 <div className="bg-slate-800/80 rounded-xl p-3 text-center mb-5 border border-slate-700">
-                  <span className="text-xs font-bold text-indigo-300">Hasta 100 entrevistas mensuales</span>
+                  <span className="text-xs font-bold text-indigo-300">+100 entrevistas acumulativas mensuales</span>
                 </div>
 
                 <ul className="space-y-2.5 text-xs text-slate-300 mb-6">
@@ -404,7 +441,11 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span>100 Evaluaciones de Voz / mes</span>
+                    <span><strong>100 Evaluaciones de Voz / mes</strong> (Acumulativas)</span>
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Check className="w-4 h-4 text-indigo-400 shrink-0" />
+                    <span>Evaluaciones acumulativas mes con mes</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-indigo-400 shrink-0" />
@@ -440,11 +481,27 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose }) =
                   disabled={loadingPlan !== null || cancelingSubscription}
                   className="w-full py-2.5 px-4 font-semibold text-xs rounded-xl transition-all shadow-xs bg-white hover:bg-slate-100 text-slate-900 cursor-pointer"
                 >
-                  {loadingPlan === 'corp' ? 'Procesando...' : 'Seleccionar Corporativo'}
+                  {loadingPlan === 'corp' ? 'Procesando...' : isPastDue && currentPlan === 'corp' ? 'Reactivar Mensualidad Corporativa' : 'Seleccionar Corporativo'}
                 </button>
               )}
             </div>
 
+          </div>
+
+          {/* Cumulative & Monthly Validation Explanation Box */}
+          <div className="mt-6 p-4 rounded-2xl bg-indigo-50/70 border border-indigo-100 flex items-start gap-3.5">
+            <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div className="text-xs text-slate-600 space-y-1">
+              <p className="font-bold text-slate-900 text-sm">¿Cómo funcionan las evaluaciones acumulativas y la validación mensual?</p>
+              <p>
+                • <strong>Evaluaciones 100% Acumulativas:</strong> La cantidad de evaluaciones no utilizadas durante el mes <strong>no se reinicia a cero</strong>. Todas tus evaluaciones restantes se conservan intactas y se van sumando con cada nueva recarga mensual.
+              </p>
+              <p>
+                • <strong>Validación y Pago Mensual:</strong> Para continuar disfrutando de la plataforma y de tus evaluaciones acumuladas, el pago se valida mensualmente. En caso de pausa en el pago, tus evaluaciones permanecen guardadas hasta que reactives tu mensualidad.
+              </p>
+            </div>
           </div>
 
           {isSubscribed && profile?.stripeCustomerId && (

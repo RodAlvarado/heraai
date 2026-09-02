@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import { 
   Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, 
   Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, 
-  ShieldAlert, Mail, RefreshCw, Link2, Users, Building2, Share2 
+  ShieldAlert, Mail, RefreshCw, Link2, Users, Building2, Share2, AlertCircle 
 } from 'lucide-react';
 import { ROLES_BY_CATEGORY } from './roles';
 import { VOICE_SYSTEM_PROMPT } from './systemPrompt';
@@ -15,8 +15,8 @@ import { InterviewHistory } from './components/InterviewHistory';
 import { CompanyInviteModal } from './components/CompanyInviteModal';
 import { CandidateManagementHub } from './components/CandidateManagementHub';
 import { CandidatePortal } from './components/CandidatePortal';
-import { db } from './lib/firebase';
-import { collection, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore';
+import { db, isUserSubscriptionActive, getExpiresAtMillis } from './lib/firebase';
+import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
 import { getOrFetchGeminiApiKey, createGeminiClient } from './lib/gemini';
 
 function MainApp() {
@@ -92,20 +92,51 @@ function MainApp() {
         .then(res => res.json())
         .then(async (data) => {
           if (data.verified) {
-            const limits = { basic: 5, pro: 20, corp: 100 };
+            const planIncrements = { basic: 5, pro: 20, corp: 100 };
             const activatedPlan = (data.planKey as 'basic' | 'pro' | 'corp') || planFromUrl || 'pro';
+            const quotaAdded = planIncrements[activatedPlan] || 20;
             const userRef = doc(db, 'users', user.uid);
             
+            // Read latest profile data to accumulate evaluations accurately
+            let currentLimit = 2;
+            let currentExpiresMs = 0;
+            let currentCount = 0;
+            let existingCustomerId = '';
+
+            try {
+              const userSnap = await getDoc(userRef);
+              if (userSnap.exists()) {
+                const userData = userSnap.data();
+                currentLimit = userData.interviewsLimit ?? (userData.subscriptionStatus === 'active' ? 20 : 2);
+                currentExpiresMs = getExpiresAtMillis(userData.subscriptionExpiresAt) || 0;
+                currentCount = userData.interviewsCount || 0;
+                existingCustomerId = userData.stripeCustomerId || '';
+              }
+            } catch (err) {
+              console.warn("Could not fetch userDoc before accumulating:", err);
+            }
+
+            // Evaluations are cumulative: new quota adds onto previous total
+            const newCumulativeLimit = currentLimit + quotaAdded;
+
+            // Monthly validation: 30 days validity from now (or extends existing active period)
+            const now = Date.now();
+            const baseMs = currentExpiresMs > now ? currentExpiresMs : now;
+            const newExpiresAt = new Date(baseMs + 30 * 24 * 60 * 60 * 1000);
+
             await updateDoc(userRef, {
               subscriptionStatus: 'active',
               subscriptionPlan: activatedPlan,
-              interviewsLimit: limits[activatedPlan] || 20,
-              stripeCustomerId: data.customerId || '',
+              interviewsLimit: newCumulativeLimit,
+              subscriptionExpiresAt: newExpiresAt,
+              lastPaymentDate: serverTimestamp(),
+              stripeCustomerId: data.customerId || existingCustomerId,
               updatedAt: serverTimestamp(),
             });
 
             await refreshProfile();
-            setPaymentNotice(`🎉 ¡Pago verificado con éxito! Tu ${activatedPlan === 'basic' ? 'Plan Básico' : activatedPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${limits[activatedPlan]} evaluaciones/mes) ha sido activado.`);
+            const remaining = Math.max(0, newCumulativeLimit - currentCount);
+            setPaymentNotice(`🎉 ¡Pago mensual verificado con éxito! Tu ${activatedPlan === 'basic' ? 'Plan Básico' : activatedPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} está activo. Se sumaron +${quotaAdded} evaluaciones acumulativas a tu cuenta (Total acumulado: ${remaining} disponibles).`);
             
             // Clean query parameters cleanly from URL
             window.history.replaceState({}, document.title, window.location.pathname);
@@ -388,7 +419,18 @@ function MainApp() {
     // Refresh profile from Firestore to ensure we have the absolute latest count and plan status
     await refreshProfile();
 
-    const currentLimit = profile?.interviewsLimit ?? (profile?.subscriptionStatus === 'active' ? (profile?.subscriptionPlan === 'basic' ? 5 : profile?.subscriptionPlan === 'corp' ? 100 : 20) : 2);
+    const isSubActive = isUserSubscriptionActive(profile);
+    const hasPaidPlan = profile?.subscriptionPlan === 'basic' || profile?.subscriptionPlan === 'pro' || profile?.subscriptionPlan === 'corp';
+    const isDev = profile?.email?.toLowerCase() === 'rodrigoalto25@gmail.com' || profile?.uid === 'MofrK18CvYXsecnf8a6WynBeJWN2';
+
+    // Validate monthly subscription payment
+    if (hasPaidPlan && !isSubActive && !isDev) {
+      alert('Tu mensualidad de HERA ha vencido. Por favor renueva tu suscripción para continuar realizando evaluaciones. ¡Tus evaluaciones acumuladas están guardadas!');
+      setIsPricingOpen(true);
+      return;
+    }
+
+    const currentLimit = profile?.interviewsLimit ?? (isSubActive ? (profile?.subscriptionPlan === 'basic' ? 5 : profile?.subscriptionPlan === 'corp' ? 100 : 20) : 2);
     const currentCount = profile?.interviewsCount || 0;
 
     if (currentCount >= currentLimit) {
@@ -608,6 +650,24 @@ function MainApp() {
         </div>
       )}
 
+      {/* Monthly Subscription Expired Alert Banner */}
+      {profile?.subscriptionPlan && !isUserSubscriptionActive(profile) && profile?.email?.toLowerCase() !== 'rodrigoalto25@gmail.com' && (
+        <div className="bg-rose-700 text-white px-4 py-2.5 text-xs flex items-center justify-between shadow-xs sticky top-0 z-30">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              Tu mensualidad del {profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} ha vencido. Tus evaluaciones acumuladas ({profile.interviewsCount || 0}/{userLimit}) están seguras. Renueva tu pago mensual para reactivar el servicio.
+            </span>
+          </div>
+          <button
+            onClick={() => setIsPricingOpen(true)}
+            className="px-3 py-1 bg-white hover:bg-rose-50 text-rose-900 font-bold text-xs rounded-lg transition-colors shrink-0 ml-3 cursor-pointer"
+          >
+            Renovar Mensualidad ($14.99 USD)
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
@@ -628,28 +688,39 @@ function MainApp() {
         {/* Header Right Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
           {/* Subscription Status Pill */}
-          <button
-            onClick={() => setIsPricingOpen(true)}
-            className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
-              profile?.subscriptionStatus === 'active' 
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
-                : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden md:inline">
-              {profile?.subscriptionStatus === 'active' ? (
-                `${profile.subscriptionPlan === 'basic' ? 'Plan Básico' : profile.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile.interviewsCount || 0}/${userLimit})`
-              ) : user ? (
-                `Prueba Gratis (${profile?.interviewsCount || 0}/${userLimit})`
-              ) : (
-                'Planes & Precios'
-              )}
-            </span>
-            <span className="md:hidden">
-              {profile?.subscriptionStatus === 'active' ? `${profile.interviewsCount || 0}/${userLimit}` : 'Planes'}
-            </span>
-          </button>
+          {(() => {
+            const isSubActive = isUserSubscriptionActive(profile);
+            const isExpired = profile?.subscriptionPlan && !isSubActive && profile?.email?.toLowerCase() !== 'rodrigoalto25@gmail.com';
+            
+            return (
+              <button
+                onClick={() => setIsPricingOpen(true)}
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
+                  isExpired
+                    ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                    : isSubActive 
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden md:inline">
+                  {isExpired ? (
+                    `Mensualidad Vencida - Renovar (${profile?.interviewsCount || 0}/${userLimit})`
+                  ) : isSubActive ? (
+                    `${profile?.subscriptionPlan === 'basic' ? 'Plan Básico' : profile?.subscriptionPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} (${profile?.interviewsCount || 0}/${userLimit})`
+                  ) : user ? (
+                    `Prueba Gratis (${profile?.interviewsCount || 0}/${userLimit})`
+                  ) : (
+                    'Planes & Precios'
+                  )}
+                </span>
+                <span className="md:hidden">
+                  {isExpired ? 'Renovar' : isSubActive ? `${profile?.interviewsCount || 0}/${userLimit}` : 'Planes'}
+                </span>
+              </button>
+            );
+          })()}
 
           {/* User Auth Section */}
           {user ? (

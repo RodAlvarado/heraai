@@ -44,8 +44,44 @@ export interface UserProfile {
   stripeSubscriptionId?: string;
   interviewsCount: number;
   interviewsLimit: number;
+  subscriptionExpiresAt?: any;
+  lastPaymentDate?: any;
   createdAt?: any;
   updatedAt?: any;
+}
+
+/**
+ * Extracts timestamp in milliseconds from Firestore Timestamp, Date, string, or number.
+ */
+export function getExpiresAtMillis(expiresAt: any): number | null {
+  if (!expiresAt) return null;
+  if (typeof expiresAt.toMillis === 'function') return expiresAt.toMillis();
+  if (typeof expiresAt.toDate === 'function') return expiresAt.toDate().getTime();
+  if (expiresAt instanceof Date) return expiresAt.getTime();
+  if (typeof expiresAt === 'number') return expiresAt;
+  if (typeof expiresAt === 'string') {
+    const parsed = new Date(expiresAt).getTime();
+    return isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+/**
+ * Validates if the subscription is currently active and within its valid monthly billing cycle.
+ */
+export function isUserSubscriptionActive(profile: UserProfile | null | undefined): boolean {
+  if (!profile) return false;
+  const isDev = profile.email?.toLowerCase() === 'rodrigoalto25@gmail.com' || profile.uid === 'MofrK18CvYXsecnf8a6WynBeJWN2';
+  if (isDev) return true;
+
+  if (profile.subscriptionStatus !== 'active') return false;
+
+  const expiresMs = getExpiresAtMillis(profile.subscriptionExpiresAt);
+  if (expiresMs && Date.now() > expiresMs) {
+    return false;
+  }
+
+  return true;
 }
 
 export interface InterviewRecord {
@@ -87,6 +123,22 @@ export async function syncUserProfile(user: User): Promise<UserProfile> {
           });
         } catch (updateErr) {
           console.warn("Could not update Firestore profile with corp plan:", updateErr);
+        }
+      }
+
+      // Check monthly subscription expiration for paid plans (keep evaluations intact)
+      if (!isRodrigoDev && data.subscriptionStatus === 'active' && data.subscriptionPlan) {
+        const expiresMs = getExpiresAtMillis(data.subscriptionExpiresAt);
+        if (expiresMs && Date.now() > expiresMs) {
+          data.subscriptionStatus = 'past_due';
+          try {
+            await updateDoc(userRef, {
+              subscriptionStatus: 'past_due',
+              updatedAt: serverTimestamp(),
+            });
+          } catch (updateErr) {
+            console.warn("Could not update expired subscription status:", updateErr);
+          }
         }
       }
 
