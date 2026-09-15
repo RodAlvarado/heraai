@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, Type, Modality } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import { 
-  Mic, MicOff, Square, Bot, Briefcase, ChevronRight, CheckCircle2, 
+  Mic, MicOff, Square, Briefcase, ChevronRight, CheckCircle2, 
   Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, 
   ShieldAlert, Mail, RefreshCw, Link2, Users, Building2, Share2, AlertCircle 
 } from 'lucide-react';
@@ -15,6 +15,7 @@ import { InterviewHistory } from './components/InterviewHistory';
 import { CompanyInviteModal } from './components/CompanyInviteModal';
 import { CandidateManagementHub } from './components/CandidateManagementHub';
 import { CandidatePortal } from './components/CandidatePortal';
+import { HeraLogo } from './components/HeraLogo';
 import { db, isUserSubscriptionActive, getExpiresAtMillis } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
 import { getOrFetchGeminiApiKey, createGeminiClient } from './lib/gemini';
@@ -671,12 +672,7 @@ function MainApp() {
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-slate-50 border border-slate-100 shadow-sm">
-            <img src="/logo.png" alt="HERA Logo" className="w-full h-full object-cover" onError={(e) => {
-              e.currentTarget.style.display = 'none';
-              e.currentTarget.parentElement!.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-indigo-600"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>';
-            }} />
-          </div>
+          <HeraLogo size="md" />
           <div>
             <h1 className="font-bold text-lg tracking-tight text-slate-900 flex items-center gap-2">
               HERA <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold border border-indigo-100">SaaS ATS</span>
@@ -950,7 +946,7 @@ function MainApp() {
                   </>
                 ) : (
                   <>
-                    <Bot className="w-4 h-4 text-indigo-600" />
+                    <HeraLogo size="xs" />
                     <span className="font-medium">HERA está hablando o procesando...</span>
                   </>
                 )

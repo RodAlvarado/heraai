@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Bot, Mail, Lock, User as UserIcon, AlertCircle, X, CheckCircle2, Send } from 'lucide-react';
+import { HeraLogo } from './HeraLogo';
+import { Mail, Lock, User as UserIcon, AlertCircle, X, CheckCircle2, Send } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -89,13 +90,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         </button>
 
         {/* Header Banner */}
-        <div className="bg-gradient-to-br from-indigo-600 via-indigo-700 to-slate-900 px-6 py-8 text-white text-center relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full blur-2xl pointer-events-none"></div>
-          <div className="w-12 h-12 bg-white/10 backdrop-blur-md rounded-2xl flex items-center justify-center mx-auto mb-3 border border-white/20 shadow-inner">
-            <Bot className="w-6 h-6 text-white" />
+        <div className="bg-gradient-to-br from-indigo-900 via-slate-900 to-[#07152B] px-6 py-8 text-white text-center relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-amber-500/10 rounded-full blur-2xl pointer-events-none"></div>
+          <div className="flex justify-center mb-3">
+            <HeraLogo size="lg" />
           </div>
           <h3 className="text-xl font-bold tracking-tight">HERA SaaS</h3>
-          <p className="text-indigo-200 text-xs mt-1">Human Evaluation & Recruitment AI</p>
+          <p className="text-indigo-200 text-xs mt-1">Human Evaluation &amp; Recruitment AI</p>
         </div>
 
         {/* Body */}
