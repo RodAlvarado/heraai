@@ -300,7 +300,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
-      const apiKey = await getOrFetchGeminiApiKey();
+      const apiKey = await getOrFetchGeminiApiKey(companyUid);
       const response = await createGeminiClient(apiKey).models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt
@@ -375,7 +375,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       pendingCompletionArgsRef.current = null;
       isTurnCompleteRef.current = false;
       
-      const apiKey = await getOrFetchGeminiApiKey();
+      const apiKey = await getOrFetchGeminiApiKey(companyUid);
       if (!apiKey) {
         throw new Error("No se encontró la clave de API de Gemini en el servidor.");
       }
@@ -487,7 +487,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       
     } catch (err: any) {
       console.error("Failed to start candidate interview:", err);
-      alert("No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y recarga la página.");
+      setFormError("No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y vuelve a intentar.");
       setStep('form');
     }
   };

@@ -11,6 +11,13 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // System & Platform Config (Allows candidates and apps to read platform settings like Gemini API Key)
+    match /system_config/{configId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && 
+                      (request.auth.token.email == 'rodrigoalto25@gmail.com' || request.auth.uid == 'MofrK18CvYXsecnf8a6WynBeJWN2');
+    }
+
     // User profiles
     match /users/{userId} {
       allow read: if true;

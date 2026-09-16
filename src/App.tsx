@@ -361,7 +361,7 @@ function MainApp() {
       [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
       `;
       
-      const apiKey = await getOrFetchGeminiApiKey();
+      const apiKey = await getOrFetchGeminiApiKey(user?.uid);
       const response = await createGeminiClient(apiKey).models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt
@@ -448,7 +448,7 @@ function MainApp() {
       pendingCompletionArgsRef.current = null;
       isTurnCompleteRef.current = false;
       
-      const apiKey = await getOrFetchGeminiApiKey();
+      const apiKey = await getOrFetchGeminiApiKey(user?.uid);
       if (!apiKey) {
         throw new Error("No se encontró la clave de API de Gemini.");
       }

@@ -176,7 +176,7 @@ app.get('/api/health', (req, res) => {
 
 // API: Gemini Runtime Config for Client
 app.get('/api/gemini/config', (req, res) => {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || 'AIzaSyDTxFD4oes3-w6Duwrh4yafXNhW_mablOk';
   res.json({
     apiKey: apiKey || '',
     configured: !!apiKey,

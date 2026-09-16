@@ -36,6 +36,16 @@
         "createdAt": { "type": "string" }
       },
       "required": ["userId", "role"]
+    },
+    "system_config": {
+      "title": "System Config",
+      "description": "Platform settings including Gemini AI runtime parameters",
+      "type": "object",
+      "properties": {
+        "apiKey": { "type": "string" },
+        "model": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
     }
   }
 }
