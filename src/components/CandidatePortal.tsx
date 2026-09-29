@@ -9,7 +9,12 @@ import { ROLES_BY_CATEGORY } from '../roles';
 import { HeraLogo } from './HeraLogo';
 import { db } from '../lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
-import { getOrFetchGeminiApiKey, createGeminiClient } from '../lib/gemini';
+import { 
+  getOrFetchGeminiApiKey, 
+  createGeminiClient, 
+  GEMINI_LIVE_MODEL, 
+  GEMINI_TEXT_MODEL 
+} from '../lib/gemini';
 
 interface CandidatePortalProps {
   companyUid: string;
@@ -117,12 +122,13 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
     if (isAnswering) {
       setIsAnswering(false);
       isAnsweringRef.current = false;
-      sessionRef.current.sendRealtimeInput({ activityEnd: {} });
+      try {
+        sessionRef.current.sendClientContent({ turnComplete: true });
+      } catch (e) {}
     } else {
       stopAudio();
       setIsAnswering(true);
       isAnsweringRef.current = true;
-      sessionRef.current.sendRealtimeInput({ activityStart: {} });
     }
   };
 
@@ -244,13 +250,12 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         
         sessionPromise.then(session => {
           session.sendRealtimeInput({ 
-            mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }] 
+            audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
           });
         }).catch(() => {});
       };
       
       source.connect(workletNode);
-      workletNode.connect(ctx.destination);
     } catch (err) {
       console.error("Error accessing microphone for candidate:", err);
       alert("Se requiere acceso al micrófono para realizar la evaluación de voz.");
@@ -301,8 +306,11 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       `;
       
       const apiKey = await getOrFetchGeminiApiKey(companyUid);
+      if (!apiKey) {
+        throw new Error("No se encontró una clave de Gemini activa configurada por la empresa.");
+      }
       const response = await createGeminiClient(apiKey).models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt
       });
       
@@ -388,12 +396,9 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       
       const aiClient = createGeminiClient(apiKey);
       const sessionPromise = aiClient.live.connect({
-        model: "gemini-2.5-flash-native-audio-preview-09-2025",
+        model: GEMINI_LIVE_MODEL,
         config: {
           responseModalities: [Modality.AUDIO],
-          realtimeInputConfig: {
-            automaticActivityDetection: { disabled: true }
-          },
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
@@ -420,22 +425,6 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
           onopen: () => {
             console.log("Candidate Live Session Connected!");
             startRecording(sessionPromise);
-            
-            sessionPromise.then(session => {
-              session.sendClientContent({
-                turns: [
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text: `Hola HERA, soy ${firstName.trim()} ${lastName.trim()} y estoy listo para iniciar mi entrevista de evaluación para el puesto de ${selectedRole}. Por favor salúdame por mi nombre, preséntate brevemente y hazme la primera pregunta.`
-                      }
-                    ]
-                  }
-                ],
-                turnComplete: true
-              });
-            }).catch(err => console.error("Failed to send initial candidate message:", err));
           },
           onmessage: async (message: any) => {
             const parts = message.serverContent?.modelTurn?.parts;
@@ -483,11 +472,36 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
         }
       });
       
-      sessionRef.current = await sessionPromise;
+      const session = await sessionPromise;
+      sessionRef.current = session;
+
+      // Kick off conversation turn so HERA speaks first
+      try {
+        session.sendClientContent({
+          turns: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Hola HERA, soy ${firstName.trim()} ${lastName.trim()} y estoy listo para iniciar mi entrevista de evaluación para el puesto de ${selectedRole}. Por favor salúdame por mi nombre, preséntate brevemente y hazme la primera pregunta.`
+                }
+              ]
+            }
+          ],
+          turnComplete: true
+        });
+      } catch (triggerErr) {
+        console.warn("Could not send initial candidate trigger:", triggerErr);
+      }
       
     } catch (err: any) {
       console.error("Failed to start candidate interview:", err);
-      setFormError("No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y vuelve a intentar.");
+      const isKeyError = err?.message?.includes("clave") || err?.message?.includes("API") || err?.message?.includes("Permission denied");
+      setFormError(
+        isKeyError 
+          ? "El sistema de IA de HERA para esta vacante requiere actualización de credenciales por parte de la empresa reclutadora. Por favor notifícales."
+          : "No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y vuelve a intentar."
+      );
       setStep('form');
     }
   };

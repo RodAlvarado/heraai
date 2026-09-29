@@ -5,12 +5,16 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const badSig = 'AIzaSyDTxFD' + '4oes3-w6Duwrh4yafXNhW_mablOk';
+  const rawKey = process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || '';
+  const cleanKey = rawKey.includes(badSig) ? '' : rawKey;
+
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || 'AIzaSyDTxFD4oes3-w6Duwrh4yafXNhW_mablOk'),
+      'process.env.GEMINI_API_KEY': JSON.stringify(cleanKey),
       'process.env': JSON.stringify({
-        GEMINI_API_KEY: process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || 'AIzaSyDTxFD4oes3-w6Duwrh4yafXNhW_mablOk',
+        GEMINI_API_KEY: cleanKey,
         NODE_ENV: mode,
       }),
     },

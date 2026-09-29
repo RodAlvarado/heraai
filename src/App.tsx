@@ -15,10 +15,18 @@ import { InterviewHistory } from './components/InterviewHistory';
 import { CompanyInviteModal } from './components/CompanyInviteModal';
 import { CandidateManagementHub } from './components/CandidateManagementHub';
 import { CandidatePortal } from './components/CandidatePortal';
+import { GeminiKeyModal } from './components/GeminiKeyModal';
 import { HeraLogo } from './components/HeraLogo';
 import { db, isUserSubscriptionActive, getExpiresAtMillis } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
-import { getOrFetchGeminiApiKey, createGeminiClient } from './lib/gemini';
+import { 
+  getOrFetchGeminiApiKey, 
+  createGeminiClient, 
+  GEMINI_LIVE_MODEL, 
+  GEMINI_TEXT_MODEL,
+  isKeyValidFormat 
+} from './lib/gemini';
+import { Key } from 'lucide-react';
 
 function MainApp() {
   const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
@@ -52,6 +60,8 @@ function MainApp() {
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [inviteRoleForModal, setInviteRoleForModal] = useState<string>('SEO Specialist');
   const [isCandidateHubOpen, setIsCandidateHubOpen] = useState(false);
+  const [isGeminiKeyModalOpen, setIsGeminiKeyModalOpen] = useState(false);
+  const [geminiKeyConfigured, setGeminiKeyConfigured] = useState(true);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
   const [emailNotice, setEmailNotice] = useState<string | null>(null);
@@ -152,6 +162,15 @@ function MainApp() {
     }
   }, [user]);
 
+  // Check if Gemini API key is configured
+  useEffect(() => {
+    getOrFetchGeminiApiKey(user?.uid).then(key => {
+      setGeminiKeyConfigured(isKeyValidFormat(key));
+    }).catch(() => {
+      setGeminiKeyConfigured(false);
+    });
+  }, [user]);
+
   // If candidate is visiting via invite link, render candidate portal immediately
   if (candidateInviteUid) {
     return (
@@ -182,12 +201,13 @@ function MainApp() {
     if (isAnswering) {
       setIsAnswering(false);
       isAnsweringRef.current = false;
-      sessionRef.current.sendRealtimeInput({ activityEnd: {} });
+      try {
+        sessionRef.current.sendClientContent({ turnComplete: true });
+      } catch (e) {}
     } else {
       stopAudio();
       setIsAnswering(true);
       isAnsweringRef.current = true;
-      sessionRef.current.sendRealtimeInput({ activityStart: {} });
     }
   };
 
@@ -309,13 +329,12 @@ function MainApp() {
         
         sessionPromise.then(session => {
           session.sendRealtimeInput({ 
-            mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }] 
+            audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
           });
         }).catch(() => {});
       };
       
       source.connect(workletNode);
-      workletNode.connect(ctx.destination);
     } catch (err) {
       console.error("Error accessing microphone:", err);
       alert("Microphone access is required for the voice interview.");
@@ -362,8 +381,11 @@ function MainApp() {
       `;
       
       const apiKey = await getOrFetchGeminiApiKey(user?.uid);
+      if (!apiKey) {
+        throw new Error("No se encontró la clave de API de Gemini.");
+      }
       const response = await createGeminiClient(apiKey).models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_TEXT_MODEL,
         contents: prompt
       });
       
@@ -461,12 +483,9 @@ function MainApp() {
       
       const aiClient = createGeminiClient(apiKey);
       const sessionPromise = aiClient.live.connect({
-        model: "gemini-2.5-flash-native-audio-preview-09-2025",
+        model: GEMINI_LIVE_MODEL,
         config: {
           responseModalities: [Modality.AUDIO],
-          realtimeInputConfig: {
-            automaticActivityDetection: { disabled: true }
-          },
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
@@ -493,22 +512,6 @@ function MainApp() {
           onopen: () => {
             console.log("Main App Live Session Connected!");
             startRecording(sessionPromise);
-            
-            sessionPromise.then(session => {
-              session.sendClientContent({
-                turns: [
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text: `Hola HERA, estoy listo para iniciar la entrevista para la posición de ${role}. Por favor preséntate y comienza con la primera pregunta.`
-                      }
-                    ]
-                  }
-                ],
-                turnComplete: true
-              });
-            }).catch(err => console.error("Failed to send initial message:", err));
           },
           onmessage: async (message: any) => {
             const parts = message.serverContent?.modelTurn?.parts;
@@ -556,11 +559,36 @@ function MainApp() {
         }
       });
       
-      sessionRef.current = await sessionPromise;
+      const session = await sessionPromise;
+      sessionRef.current = session;
+
+      // Trigger initial conversation prompt so HERA speaks immediately
+      try {
+        session.sendClientContent({
+          turns: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Hola HERA, estoy listo para iniciar la entrevista para la posición de ${role}. Por favor preséntate y comienza con la primera pregunta.`
+                }
+              ]
+            }
+          ],
+          turnComplete: true
+        });
+      } catch (triggerErr) {
+        console.warn("Could not send initial message trigger:", triggerErr);
+      }
       
     } catch (err: any) {
       console.error("Failed to start interview:", err);
-      alert("No se pudo iniciar la entrevista de voz (" + (err?.message || "error de micrófono/conexión") + "). Por favor verifica los permisos.");
+      const isKeyError = err?.message?.includes("clave") || err?.message?.includes("API") || err?.message?.includes("Permission denied");
+      if (isKeyError) {
+        setIsGeminiKeyModalOpen(true);
+      } else {
+        alert("No se pudo iniciar la entrevista de voz (" + (err?.message || "error de micrófono/conexión") + "). Por favor verifica los permisos.");
+      }
       setStep('select_role');
     }
   };
@@ -669,6 +697,24 @@ function MainApp() {
         </div>
       )}
 
+      {/* Missing or Inactive Gemini API Key Warning Banner */}
+      {user && !geminiKeyConfigured && (
+        <div className="bg-amber-500 text-white text-xs font-medium py-2.5 px-4 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-xs shrink-0">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              <strong>Atención:</strong> Para que HERA inicie las evaluaciones de voz en todas las categorías y enlaces corporativos, ingresa tu Gemini API Key de Google AI Studio.
+            </span>
+          </div>
+          <button
+            onClick={() => setIsGeminiKeyModalOpen(true)}
+            className="px-3 py-1 bg-white hover:bg-amber-50 text-amber-900 font-bold text-xs rounded-lg transition-colors shrink-0 cursor-pointer"
+          >
+            Configurar Clave Ahora
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
@@ -753,6 +799,19 @@ function MainApp() {
                 title="Historial de Entrevistas"
               >
                 <History className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={() => setIsGeminiKeyModalOpen(true)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+                  geminiKeyConfigured
+                    ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                    : 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 shadow-sm animate-pulse'
+                }`}
+                title="Configuración de Clave Gemini API"
+              >
+                <Key className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Gemini API</span>
               </button>
 
               <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
@@ -1039,6 +1098,14 @@ function MainApp() {
         onOpenInviteModal={() => {
           setIsCandidateHubOpen(false);
           setIsInviteModalOpen(true);
+        }}
+      />
+      <GeminiKeyModal
+        isOpen={isGeminiKeyModalOpen}
+        onClose={() => setIsGeminiKeyModalOpen(false)}
+        onKeySaved={() => {
+          setGeminiKeyConfigured(true);
+          refreshProfile();
         }}
       />
     </div>
