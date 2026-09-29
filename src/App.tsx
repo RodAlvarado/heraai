@@ -227,6 +227,15 @@ function MainApp() {
       return;
     }
 
+    // Request microphone permission directly on user click
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+    } catch (micErr) {
+      console.warn('Microphone permission on click:', micErr);
+    }
+
     setSelectedRole(role);
     setStep('interview');
     interviewStartTimeRef.current = Date.now();
@@ -234,24 +243,28 @@ function MainApp() {
     setConversationHistory([]);
     setCandidateResponse('');
 
+    const candidateDisp = user.displayName || user.email?.split('@')[0] || 'Candidato';
     try {
-      const candidateDisp = user.displayName || user.email?.split('@')[0] || 'Candidato';
       const sessionResult = await startInterviewSession({
         role: role,
         candidateName: candidateDisp,
       });
 
-      const initialText = sessionResult.text;
+      const initialText = sessionResult.text || `¡Hola ${candidateDisp}! Mucho gusto, soy HERA. Iniciemos tu entrevista para el puesto de ${role}. ¿Cuál ha sido tu proyecto más relevante?`;
       setHeraText(initialText);
       setConversationHistory([
         { role: 'model', text: initialText }
       ]);
 
-      await playHeraVoice(initialText);
+      playHeraVoice(initialText);
     } catch (err: any) {
-      console.error('Failed to start interview:', err);
-      alert('No se pudo conectar con el servicio de voz de HERA (' + (err?.message || 'error de conexión') + '). Por favor reintenta.');
-      setStep('select_role');
+      console.warn('Fallback starting interview:', err);
+      const fallbackGreeting = `¡Hola ${candidateDisp}! Soy HERA, tu reclutadora de inteligencia artificial. Te doy la bienvenida a tu evaluación técnica para la posición de ${role}. Para iniciar: ¿Podrías compartirme cuál ha sido tu proyecto o desafío técnico más importante en este rol y cómo lo solucionaste?`;
+      setHeraText(fallbackGreeting);
+      setConversationHistory([
+        { role: 'model', text: fallbackGreeting }
+      ]);
+      playHeraVoice(fallbackGreeting);
     }
   };
 
