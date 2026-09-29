@@ -1,150 +1,271 @@
-import { GoogleGenAI } from '@google/genai';
-import { db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+/**
+ * HERA AI Recruitment Engine Client
+ * 
+ * All Gemini interactions are securely routed through server-side proxy endpoints (/api/interview/*, /api/gemini/*).
+ * No API keys are required or exposed in the frontend.
+ */
 
-export const GEMINI_LIVE_MODEL = 'gemini-3.8-live';
 export const GEMINI_TEXT_MODEL = 'gemini-3.8-flash';
+export const GEMINI_LIVE_MODEL = 'gemini-3.8-live';
 
-let cachedApiKey: string = '';
+export interface InterviewSessionMessage {
+  role: 'user' | 'model';
+  text: string;
+}
 
-const SUSPENDED_KEY_SIGNATURE = 'AIzaSyDTxFD' + '4oes3-w6Duwrh4yafXNhW_mablOk';
+export interface StartInterviewParams {
+  role: string;
+  candidateName?: string;
+}
 
-export function isKeyValidFormat(key?: string | null): boolean {
-  if (!key) return false;
-  const trimmed = key.trim();
-  if (!trimmed || trimmed === 'dummy-key-placeholder') return false;
-  // Suspended key blacklisted
-  if (trimmed.includes(SUSPENDED_KEY_SIGNATURE)) return false;
-  return trimmed.startsWith('AIzaSy') && trimmed.length >= 35;
+export interface StartInterviewResult {
+  success: boolean;
+  text: string;
+  questionNumber: number;
+  isFinished: boolean;
+  error?: string;
+}
+
+export interface RespondInterviewParams {
+  role: string;
+  candidateName?: string;
+  history: InterviewSessionMessage[];
+  userResponse: string;
+  questionNumber: number;
+}
+
+export interface RespondInterviewResult {
+  success: boolean;
+  text: string;
+  questionNumber: number;
+  isFinished: boolean;
+  error?: string;
+}
+
+export interface EvaluateInterviewParams {
+  role: string;
+  candidateName?: string;
+  candidateEmail?: string;
+  history: InterviewSessionMessage[];
+}
+
+export interface EvaluateInterviewResult {
+  success: boolean;
+  score: number;
+  redFlags: number;
+  summary: string;
+  markdownReport: string;
+  error?: string;
 }
 
 /**
- * Resolves the Gemini API key from multiple sources:
- * 1. Runtime memory cache
- * 2. Firestore `system_config/gemini` (platform-wide key)
- * 3. Firestore `users/{companyUid}` (company custom key)
- * 4. Injected environment variables (`process.env.GEMINI_API_KEY` / `VITE_GEMINI_API_KEY`)
- * 5. Backend `/api/gemini/config` endpoint
- * 6. Local storage cache
+ * Starts a voice interview with HERA.
+ * HERA introduces herself, explains the 3-question evaluation, and asks Question 1.
  */
-export async function getOrFetchGeminiApiKey(companyUid?: string): Promise<string> {
-  if (isKeyValidFormat(cachedApiKey)) {
-    return cachedApiKey;
+export async function startInterviewSession(params: StartInterviewParams): Promise<StartInterviewResult> {
+  const res = await fetch('/api/interview/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Error del servidor al iniciar la entrevista: ${errText}`);
   }
 
-  // 1. Try reading from Firestore system_config/gemini (accessible from any domain or candidate link)
+  return await res.json();
+}
+
+/**
+ * Submits the candidate's answer for the current question.
+ * HERA acknowledges the response, and asks the next question (or finishes the interview).
+ */
+export async function sendInterviewResponse(params: RespondInterviewParams): Promise<RespondInterviewResult> {
+  const res = await fetch('/api/interview/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Error del servidor al procesar la respuesta: ${errText}`);
+  }
+
+  return await res.json();
+}
+
+/**
+ * Generates the formal Candidate Evaluation Report and score via Gemini backend.
+ */
+export async function generateEvaluationReport(params: EvaluateInterviewParams): Promise<EvaluateInterviewResult> {
+  const res = await fetch('/api/interview/evaluate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Error del servidor al generar la evaluación: ${errText}`);
+  }
+
+  return await res.json();
+}
+
+/**
+ * Generates natural speech audio via backend Gemini TTS.
+ */
+export async function generateSpeechAudio(text: string): Promise<{ success: boolean; audioBase64?: string; mimeType?: string }> {
   try {
-    const sysSnap = await getDoc(doc(db, 'system_config', 'gemini'));
-    if (sysSnap.exists()) {
-      const data = sysSnap.data();
-      if (isKeyValidFormat(data?.apiKey)) {
-        cachedApiKey = data.apiKey.trim();
-        try { localStorage.setItem('gemini_api_key', cachedApiKey); } catch (e) {}
-        return cachedApiKey;
-      }
-    }
-  } catch (firestoreErr) {
-    console.warn('Could not read Gemini key from system_config:', firestoreErr);
-  }
+    const res = await fetch('/api/interview/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
 
-  // 2. Try reading custom key from company profile if companyUid was provided or in URL
-  const targetUid = companyUid || (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('invite') : null);
-  if (targetUid) {
-    try {
-      const userSnap = await getDoc(doc(db, 'users', targetUid));
-      if (userSnap.exists()) {
-        const uData = userSnap.data();
-        if (isKeyValidFormat(uData?.geminiApiKey)) {
-          cachedApiKey = uData.geminiApiKey.trim();
-          try { localStorage.setItem('gemini_api_key', cachedApiKey); } catch (e) {}
-          return cachedApiKey;
-        }
-      }
-    } catch (userErr) {
-      console.warn('Could not read company custom geminiApiKey:', userErr);
-    }
-  }
-
-  // 3. Try environment variables
-  const envKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ||
-                 (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
-  if (isKeyValidFormat(envKey)) {
-    cachedApiKey = envKey.trim();
-    return cachedApiKey;
-  }
-
-  // 4. Try fetching from runtime backend (/api/gemini/config)
-  try {
-    const res = await fetch('/api/gemini/config');
     if (res.ok) {
-      const data = await res.json();
-      if (isKeyValidFormat(data.apiKey)) {
-        cachedApiKey = data.apiKey.trim();
-        try { localStorage.setItem('gemini_api_key', cachedApiKey); } catch (e) {}
-        return cachedApiKey;
-      }
+      return await res.json();
     }
   } catch (err) {
-    // Backend endpoint might not exist on static hosting
+    console.warn('TTS request error, will fallback to browser voice:', err);
   }
-
-  // 5. Fallback to localStorage
-  try {
-    const saved = localStorage.getItem('gemini_api_key');
-    if (isKeyValidFormat(saved)) {
-      cachedApiKey = saved!.trim();
-      return cachedApiKey;
-    }
-  } catch (e) {}
-
-  return '';
+  return { success: false };
 }
 
 /**
- * Validates a Gemini API Key by performing a quick test request
+ * Generates generic content from Gemini via secure backend proxy.
  */
-export async function testGeminiApiKey(key: string): Promise<{ valid: boolean; error?: string }> {
-  try {
-    if (!isKeyValidFormat(key)) {
-      return { valid: false, error: 'Formato de API Key no válido.' };
-    }
-    const ai = new GoogleGenAI({ apiKey: key.trim() });
-    const response = await ai.models.generateContent({
-      model: GEMINI_TEXT_MODEL,
-      contents: 'Responde únicamente con la palabra OK si estás activo.'
-    });
-    if (response.text) {
-      return { valid: true };
-    }
-    return { valid: false, error: 'No se recibió respuesta del modelo.' };
-  } catch (err: any) {
-    return { valid: false, error: err?.message || 'Error al conectar con Gemini API' };
-  }
-}
-
-/**
- * Saves a new Gemini API Key to Firestore system_config so all corporate links and candidates share it
- */
-export async function savePlatformGeminiApiKey(key: string): Promise<void> {
-  const cleanKey = key.trim();
-  cachedApiKey = cleanKey;
-  try { localStorage.setItem('gemini_api_key', cleanKey); } catch (e) {}
-  
-  await setDoc(doc(db, 'system_config', 'gemini'), {
-    apiKey: cleanKey,
-    model: GEMINI_LIVE_MODEL,
-    updatedAt: new Date().toISOString()
+export async function generateGeminiContent(prompt: string, systemInstruction?: string): Promise<string> {
+  const res = await fetch('/api/gemini/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, systemInstruction }),
   });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err);
+  }
+
+  const data = await res.json();
+  return data.text || '';
 }
 
 /**
- * Returns a configured GoogleGenAI instance.
+ * Global audio player state to control speaking & interruptions
  */
-export function createGeminiClient(key?: string): GoogleGenAI {
-  const finalKey = key || cachedApiKey || 
-                   (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ||
-                   (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) || '';
-  return new GoogleGenAI({ apiKey: finalKey });
+let currentAudioContext: AudioContext | null = null;
+let currentSourceNode: AudioBufferSourceNode | null = null;
+
+export function stopCurrentSpeech() {
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+  }
+  if (currentSourceNode) {
+    try {
+      currentSourceNode.stop();
+    } catch (e) {}
+    currentSourceNode = null;
+  }
 }
 
+/**
+ * Plays base64 WAV audio through Web Audio API
+ */
+export async function playWavAudio(base64: string, onEnded?: () => void): Promise<() => void> {
+  stopCurrentSpeech();
 
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  currentAudioContext = audioCtx;
+
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
+
+  const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer);
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+  currentSourceNode = source;
+
+  source.onended = () => {
+    currentSourceNode = null;
+    if (onEnded) onEnded();
+  };
+
+  source.start(0);
+
+  return () => {
+    try {
+      source.stop();
+    } catch (e) {}
+    currentSourceNode = null;
+  };
+}
+
+/**
+ * Plays speech using the browser's built-in Web Speech Synthesis (Spanish female voice if available)
+ */
+export function speakWithBrowser(text: string, onEnded?: () => void): () => void {
+  stopCurrentSpeech();
+
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    if (onEnded) onEnded();
+    return () => {};
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'es-ES';
+  utterance.rate = 1.0;
+  utterance.pitch = 1.05;
+
+  const voices = window.speechSynthesis.getVoices();
+  const esVoice = voices.find(v => v.lang.startsWith('es') && (v.name.includes('Monica') || v.name.includes('Lucia') || v.name.includes('Elena') || v.name.includes('Female') || v.name.includes('Google español') || v.name.includes('Paulina'))) ||
+                  voices.find(v => v.lang.startsWith('es'));
+  if (esVoice) {
+    utterance.voice = esVoice;
+  }
+
+  utterance.onend = () => {
+    if (onEnded) onEnded();
+  };
+
+  utterance.onerror = () => {
+    if (onEnded) onEnded();
+  };
+
+  window.speechSynthesis.speak(utterance);
+
+  return () => {
+    window.speechSynthesis.cancel();
+  };
+}
+
+/**
+ * Speaks HERA's response using high quality Gemini TTS with seamless browser fallback
+ */
+export async function speakHera(text: string, onEnded?: () => void): Promise<() => void> {
+  stopCurrentSpeech();
+
+  // Try Gemini high-fidelity TTS first
+  try {
+    const ttsResult = await generateSpeechAudio(text);
+    if (ttsResult.success && ttsResult.audioBase64) {
+      return await playWavAudio(ttsResult.audioBase64, onEnded);
+    }
+  } catch (err) {
+    console.warn('Gemini TTS failed, falling back to browser synthesis:', err);
+  }
+
+  // Fallback to browser synthesis
+  return speakWithBrowser(text, onEnded);
+}

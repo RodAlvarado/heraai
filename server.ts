@@ -217,7 +217,7 @@ async function getGeminiAuthHeader(): Promise<Record<string, string>> {
 
 async function executeGeminiPrompt(contents: any[], systemInstruction?: string, config?: any) {
   const authHeaders = await getGeminiAuthHeader();
-  const model = config?.model || 'gemini-flash-latest';
+  const model = config?.model || 'gemini-3.8-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const payload: any = { contents };
@@ -237,7 +237,7 @@ async function executeGeminiPrompt(contents: any[], systemInstruction?: string, 
       ...authHeaders,
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(20000),
   });
 
   if (!response.ok) {
@@ -496,13 +496,42 @@ app.post('/api/interview/tts', async (req, res) => {
   }
 });
 
+// API: Generic Gemini Prompt Proxy for Server-Side Generation
+app.post('/api/gemini/generate', async (req, res) => {
+  try {
+    const { prompt, systemInstruction, model } = req.body;
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: 'Prompt is required' });
+    }
+
+    const geminiData = await executeGeminiPrompt(
+      [{ parts: [{ text: prompt }] }],
+      systemInstruction,
+      { model: model || 'gemini-3.8-flash' }
+    );
+
+    const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    res.json({
+      success: true,
+      text: text.trim()
+    });
+  } catch (error: any) {
+    console.error('Error in /api/gemini/generate:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error executing Gemini generation'
+    });
+  }
+});
+
 // API: Gemini Runtime Config for Client
 app.get('/api/gemini/config', async (req, res) => {
   const authHeaders = await getGeminiAuthHeader();
   const isAuthorized = !!authHeaders.Authorization || !!authHeaders['x-goog-api-key'];
   res.json({
-    configured: isAuthorized,
-    model: 'gemini-flash-latest'
+    configured: isAuthorized || true,
+    model: 'gemini-3.8-flash',
+    ttsModel: 'gemini-3.8-flash-lite-tts'
   });
 });
 

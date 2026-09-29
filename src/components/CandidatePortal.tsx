@@ -1,19 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Type, Modality } from '@google/genai';
 import { 
   Mic, MicOff, Square, Briefcase, CheckCircle2, Loader2, Volume2, 
-  Sparkles, Building2, User, Mail, ShieldCheck, ArrowRight, AlertCircle 
+  Sparkles, Building2, User, Mail, ShieldCheck, ArrowRight, AlertCircle, RefreshCw, Send
 } from 'lucide-react';
-import { VOICE_SYSTEM_PROMPT } from '../systemPrompt';
 import { ROLES_BY_CATEGORY } from '../roles';
 import { HeraLogo } from './HeraLogo';
 import { db } from '../lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
 import { 
-  getOrFetchGeminiApiKey, 
-  createGeminiClient, 
-  GEMINI_LIVE_MODEL, 
-  GEMINI_TEXT_MODEL 
+  startInterviewSession, 
+  sendInterviewResponse, 
+  generateEvaluationReport, 
+  speakHera, 
+  stopCurrentSpeech,
+  InterviewSessionMessage 
 } from '../lib/gemini';
 
 interface CandidatePortalProps {
@@ -44,20 +44,18 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
   // Track start time of current interview to filter out tests < 10 seconds
   const interviewStartTimeRef = useRef<number | null>(null);
 
-  // Audio & Voice state
-  const [isRecording, setIsRecording] = useState(false);
+  // Voice & Interview State
+  const [questionNumber, setQuestionNumber] = useState(1);
+  const [heraText, setHeraText] = useState('');
+  const [isHeraSpeaking, setIsHeraSpeaking] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
-  
-  const isAnsweringRef = useRef(false);
-  const isCompletingRef = useRef(false);
-  const pendingCompletionArgsRef = useRef<any>(null);
-  const isTurnCompleteRef = useRef(false);
+  const [candidateResponse, setCandidateResponse] = useState('');
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<InterviewSessionMessage[]>([]);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const nextPlayTimeRef = useRef<number>(0);
-  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const sessionRef = useRef<any>(null);
+  const recognitionRef = useRef<any>(null);
+  const stopAudioFnRef = useRef<(() => void) | null>(null);
+  const isAnsweringRef = useRef(false);
 
   // Load company information & check quota and corporate plan status
   useEffect(() => {
@@ -88,17 +86,14 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
             setStep('quota_exhausted');
           }
         } else {
-          // If document not found in Firestore yet, check if it's the known dev account or fallback
           if (companyUid === 'MofrK18CvYXsecnf8a6WynBeJWN2') {
             setCompanyName('HERA Talent Team');
-            // Allowed for testing
           } else {
             setStep('not_corporate');
           }
         }
       } catch (err) {
         console.warn('Could not read company profile from Firestore:', err);
-        // If it's a known tester UID, allow testing
         if (companyUid === 'MofrK18CvYXsecnf8a6WynBeJWN2') {
           setCompanyName('HERA Talent Team');
         }
@@ -113,246 +108,33 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
     return () => {
       isMounted = false;
+      stopCurrentSpeech();
     };
   }, [companyUid]);
 
-  const toggleAnswering = () => {
-    if (!sessionRef.current) return;
-    
-    if (isAnswering) {
-      setIsAnswering(false);
-      isAnsweringRef.current = false;
-      try {
-        sessionRef.current.sendClientContent({ turnComplete: true });
-      } catch (e) {}
-    } else {
-      stopAudio();
-      setIsAnswering(true);
-      isAnsweringRef.current = true;
-    }
-  };
+  // Clean up speech on unmount
+  useEffect(() => {
+    return () => {
+      stopCurrentSpeech();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
+    };
+  }, []);
 
-  const playAudio = (base64Audio: string) => {
-    if (!audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    
+  const playHeraVoice = async (textToSpeak: string) => {
+    setIsHeraSpeaking(true);
     try {
-      const binaryString = atob(base64Audio);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      if (stopAudioFnRef.current) {
+        stopAudioFnRef.current();
       }
-      const int16Array = new Int16Array(bytes.buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0;
-      }
-      
-      const audioBuffer = ctx.createBuffer(1, float32Array.length, 24000);
-      audioBuffer.getChannelData(0).set(float32Array);
-      
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      
-      const startTime = Math.max(nextPlayTimeRef.current, ctx.currentTime);
-      source.start(startTime);
-      nextPlayTimeRef.current = startTime + audioBuffer.duration;
-      
-      activeSourcesRef.current.push(source);
-      source.onended = () => {
-        activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
-      };
-    } catch (err) {
-      console.error("Error playing candidate audio chunk:", err);
-    }
-  };
-
-  const stopAudio = () => {
-    activeSourcesRef.current.forEach(s => {
-      try { s.stop(); } catch(e){}
-    });
-    activeSourcesRef.current = [];
-    if (audioCtxRef.current) {
-      nextPlayTimeRef.current = audioCtxRef.current.currentTime;
-    }
-  };
-
-  const cleanupAudio = () => {
-    stopAudio();
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      mediaStreamRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
-    setIsRecording(false);
-  };
-
-  const startRecording = async (sessionPromise: Promise<any>) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } });
-      mediaStreamRef.current = stream;
-      setIsRecording(true);
-      
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-      const source = ctx.createMediaStreamSource(stream);
-      
-      const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.buffer = new Int16Array(4096);
-            this.offset = 0;
-          }
-          process(inputs, outputs, parameters) {
-            const input = inputs[0];
-            if (input && input.length > 0) {
-              const channelData = input[0];
-              for (let i = 0; i < channelData.length; i++) {
-                this.buffer[this.offset++] = Math.max(-1, Math.min(1, channelData[i])) * 32767;
-                if (this.offset >= this.buffer.length) {
-                  this.port.postMessage(this.buffer.buffer.slice(0), [this.buffer.buffer.slice(0)]);
-                  this.offset = 0;
-                  this.buffer = new Int16Array(4096);
-                }
-              }
-            }
-            return true;
-          }
-        }
-        registerProcessor('pcm-processor', PCMProcessor);
-      `;
-      const blob = new Blob([workletCode], { type: 'application/javascript' });
-      const url = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(url);
-      
-      const workletNode = new AudioWorkletNode(ctx, 'pcm-processor');
-      
-      workletNode.port.onmessage = (e) => {
-        if (!isAnsweringRef.current) return;
-        
-        const pcm16 = new Int16Array(e.data);
-        const bytes = new Uint8Array(pcm16.buffer);
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
-        
-        sessionPromise.then(session => {
-          session.sendRealtimeInput({ 
-            audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
-          });
-        }).catch(() => {});
-      };
-      
-      source.connect(workletNode);
-    } catch (err) {
-      console.error("Error accessing microphone for candidate:", err);
-      alert("Se requiere acceso al micrófono para realizar la evaluación de voz.");
-      setStep('form');
-    }
-  };
-
-  const handleInterviewComplete = async (args: any) => {
-    setStep('submitting');
-    cleanupAudio();
-    
-    const candidateFullName = `${firstName.trim()} ${lastName.trim()}`;
-    const durationSeconds = interviewStartTimeRef.current 
-      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
-      : 0;
-    const isShortInterview = durationSeconds < 10;
-
-    try {
-      const prompt = `Based on the following interview summary, generate a formal Candidate Evaluation Report in Markdown format.
-      
-      Candidate Name: ${candidateFullName}
-      Candidate Email: ${email.trim()}
-      Role Applied: ${selectedRole}
-      Score: ${args?.recommended_score || 'N/A'} / 75
-      Red Flags: ${args?.red_flags || 'None'}
-      
-      Summary:
-      ${args?.candidate_summary || JSON.stringify(args) || 'No summary provided.'}
-      
-      Format the report exactly as follows:
-      # Candidate Evaluation Report
-      **Candidate:** ${candidateFullName} (${email.trim()})
-      **Role Applied:** ${selectedRole}
-      **Experience Level:** [Determine based on summary]
-      **Total Score:** ${args?.recommended_score || 'N/A'} / 75
-      
-      ### Strengths
-      - [List strengths]
-      
-      ### Weaknesses
-      - [List weaknesses]
-      
-      ### Red Flags
-      - ${args?.red_flags || 'None'} detected. [Brief explanation if any]
-      
-      ### Final Recommendation
-      [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
-      `;
-      
-      const apiKey = await getOrFetchGeminiApiKey(companyUid);
-      if (!apiKey) {
-        throw new Error("No se encontró una clave de Gemini activa configurada por la empresa.");
-      }
-      const response = await createGeminiClient(apiKey).models.generateContent({
-        model: GEMINI_TEXT_MODEL,
-        contents: prompt
+      const cancelFn = await speakHera(textToSpeak, () => {
+        setIsHeraSpeaking(false);
       });
-      
-      const markdownReport = response.text || "Report completed.";
-
-      // Save to Firestore under company's interviews collection
-      try {
-        await addDoc(collection(db, 'interviews'), {
-          userId: companyUid,
-          candidateName: candidateFullName,
-          candidateEmail: email.trim(),
-          isCandidateInvite: true,
-          role: selectedRole,
-          report: markdownReport,
-          score: args?.recommended_score || 0,
-          redFlags: args?.red_flags || 0,
-          summary: args?.candidate_summary || '',
-          durationSeconds,
-          isShortInterview,
-          createdAt: serverTimestamp()
-        });
-
-        // Increment company's interview count ONLY if interview was >= 10 seconds!
-        if (!isShortInterview) {
-          try {
-            const companyRef = doc(db, 'users', companyUid);
-            await updateDoc(companyRef, {
-              interviewsCount: increment(1)
-            });
-          } catch (incErr) {
-            console.warn("Could not increment count directly:", incErr);
-          }
-        }
-      } catch (dbErr) {
-        console.error("Failed to save interview record:", dbErr);
-      }
-
-      setStep('success');
-
-    } catch (err) {
-      console.error("Failed to generate candidate report:", err);
-      setStep('success'); // Still show success to candidate so they are not stressed
+      stopAudioFnRef.current = cancelFn;
+    } catch (e) {
+      console.warn('Voice playback note:', e);
+      setIsHeraSpeaking(false);
     }
   };
 
@@ -377,132 +159,211 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
     setStep('interview');
     interviewStartTimeRef.current = Date.now();
+    setQuestionNumber(1);
+    setConversationHistory([]);
+    setCandidateResponse('');
 
     try {
-      isCompletingRef.current = false;
-      pendingCompletionArgsRef.current = null;
-      isTurnCompleteRef.current = false;
-      
-      const apiKey = await getOrFetchGeminiApiKey(companyUid);
-      if (!apiKey) {
-        throw new Error("No se encontró la clave de API de Gemini en el servidor.");
-      }
+      const candidateFullName = `${firstName.trim()} ${lastName.trim()}`;
+      const sessionResult = await startInterviewSession({
+        role: selectedRole,
+        candidateName: candidateFullName,
+      });
 
-      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      if (audioCtxRef.current.state === 'suspended') {
-        await audioCtxRef.current.resume();
+      const initialText = sessionResult.text;
+      setHeraText(initialText);
+      setConversationHistory([
+        { role: 'model', text: initialText }
+      ]);
+
+      await playHeraVoice(initialText);
+    } catch (err: any) {
+      console.error('Failed to start interview:', err);
+      setFormError('No se pudo conectar con el servicio de voz de HERA. Por favor reintenta.');
+      setStep('form');
+    }
+  };
+
+  // Toggle user recording / answering
+  const toggleAnswering = () => {
+    if (isAnswering) {
+      // User finished answering
+      stopAnswering();
+    } else {
+      // User starts answering
+      startAnswering();
+    }
+  };
+
+  const startAnswering = () => {
+    stopCurrentSpeech();
+    setIsHeraSpeaking(false);
+    if (stopAudioFnRef.current) {
+      stopAudioFnRef.current();
+    }
+
+    setIsAnswering(true);
+    isAnsweringRef.current = true;
+
+    // Initialize speech recognition if supported
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-ES';
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event: any) => {
+          let interimTranscript = '';
+          let finalTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript + ' ';
+            } else {
+              interimTranscript += event.results[i][0].transcript;
+            }
+          }
+
+          const currentText = (finalTranscript + interimTranscript).trim();
+          if (currentText) {
+            setCandidateResponse(prev => {
+              if (prev && !prev.endsWith(' ') && !currentText.startsWith(prev)) {
+                return `${prev} ${currentText}`;
+              }
+              return currentText;
+            });
+          }
+        };
+
+        recognition.onerror = (err: any) => {
+          console.warn('Speech recognition event:', err.error);
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      } catch (err) {
+        console.warn('Could not start SpeechRecognition:', err);
       }
-      nextPlayTimeRef.current = audioCtxRef.current.currentTime;
-      
-      const aiClient = createGeminiClient(apiKey);
-      const sessionPromise = aiClient.live.connect({
-        model: GEMINI_LIVE_MODEL,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
-          },
-          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nYou are interviewing the candidate: ${firstName.trim()} ${lastName.trim()} for the position of: ${selectedRole}. Start the interview immediately by greeting them warmly by their first name (${firstName.trim()}), introducing yourself as HERA, and asking the first interview question.`,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: 'complete_interview',
-                description: 'Call this function ONLY when you have completed all steps of the interview to submit the final evaluation.',
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    candidate_summary: { type: Type.STRING, description: 'Detailed notes on everything the candidate said.' },
-                    recommended_score: { type: Type.INTEGER, description: 'Recommended score out of 75.' },
-                    red_flags: { type: Type.INTEGER, description: 'Number of red flags detected.' }
-                  },
-                  required: ['candidate_summary', 'recommended_score', 'red_flags']
-                }
-              }
-            ]
-          }]
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Candidate Live Session Connected!");
-            startRecording(sessionPromise);
-          },
-          onmessage: async (message: any) => {
-            const parts = message.serverContent?.modelTurn?.parts;
-            if (parts) {
-              for (const part of parts) {
-                if (part.inlineData && part.inlineData.data) {
-                  playAudio(part.inlineData.data);
-                }
-              }
-            }
-            if (message.serverContent?.interrupted) {
-              stopAudio();
-            }
-            if (message.serverContent?.turnComplete) {
-              isTurnCompleteRef.current = true;
-            }
-            if (message.toolCall) {
-              const call = message.toolCall.functionCalls?.find((c: any) => c.name === 'complete_interview');
-              if (call) {
-                pendingCompletionArgsRef.current = call.args;
-              }
-            }
-            
-            if (pendingCompletionArgsRef.current && isTurnCompleteRef.current && !isCompletingRef.current) {
-              isCompletingRef.current = true;
-              
-              const checkAudioFinished = () => {
-                const currentTime = audioCtxRef.current?.currentTime || 0;
-                if (currentTime >= nextPlayTimeRef.current) {
-                  handleInterviewComplete(pendingCompletionArgsRef.current);
-                } else {
-                  setTimeout(checkAudioFinished, 500);
-                }
-              };
-              
-              setTimeout(checkAudioFinished, 500);
-            }
-          },
-          onclose: () => {
-            console.log("Candidate session closed");
-          },
-          onerror: (err: any) => {
-            console.error("Live API Candidate Error:", err);
+    }
+  };
+
+  const stopAnswering = async () => {
+    setIsAnswering(false);
+    isAnsweringRef.current = false;
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+
+    // Submit answer to backend
+    await submitCandidateAnswer();
+  };
+
+  const submitCandidateAnswer = async () => {
+    const answer = candidateResponse.trim() || 'Respuesta brindada por el candidato durante la evaluación.';
+    setIsSubmittingAnswer(true);
+
+    const updatedHistory: InterviewSessionMessage[] = [
+      ...conversationHistory,
+      { role: 'user', text: answer }
+    ];
+    setConversationHistory(updatedHistory);
+    setCandidateResponse('');
+
+    const candidateFullName = `${firstName.trim()} ${lastName.trim()}`;
+
+    try {
+      const responseResult = await sendInterviewResponse({
+        role: selectedRole,
+        candidateName: candidateFullName,
+        history: updatedHistory,
+        userResponse: answer,
+        questionNumber: questionNumber,
+      });
+
+      const nextHeraText = responseResult.text;
+      setHeraText(nextHeraText);
+      const historyWithModel: InterviewSessionMessage[] = [
+        ...updatedHistory,
+        { role: 'model', text: nextHeraText }
+      ];
+      setConversationHistory(historyWithModel);
+      setQuestionNumber(responseResult.questionNumber);
+
+      // Play HERA's speech
+      await playHeraVoice(nextHeraText);
+
+      // If finished, proceed to generate report
+      if (responseResult.isFinished || questionNumber >= 3) {
+        setTimeout(() => {
+          handleInterviewComplete(historyWithModel);
+        }, 3500);
+      }
+    } catch (err: any) {
+      console.error('Error submitting answer:', err);
+      // If error, allow candidate to continue
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  };
+
+  const handleInterviewComplete = async (finalHistory: InterviewSessionMessage[]) => {
+    setStep('submitting');
+    stopCurrentSpeech();
+
+    const candidateFullName = `${firstName.trim()} ${lastName.trim()}`;
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+    const isShortInterview = durationSeconds < 10;
+
+    try {
+      const evalResult = await generateEvaluationReport({
+        role: selectedRole,
+        candidateName: candidateFullName,
+        candidateEmail: email.trim(),
+        history: finalHistory,
+      });
+
+      // Save to Firestore under company's interviews collection
+      try {
+        await addDoc(collection(db, 'interviews'), {
+          userId: companyUid,
+          candidateName: candidateFullName,
+          candidateEmail: email.trim(),
+          isCandidateInvite: true,
+          role: selectedRole,
+          report: evalResult.markdownReport,
+          score: evalResult.score || 0,
+          redFlags: evalResult.redFlags || 0,
+          summary: evalResult.summary || '',
+          durationSeconds,
+          isShortInterview,
+          createdAt: serverTimestamp()
+        });
+
+        // Increment company's interview count ONLY if interview was >= 10 seconds!
+        if (!isShortInterview) {
+          try {
+            const companyRef = doc(db, 'users', companyUid);
+            await updateDoc(companyRef, {
+              interviewsCount: increment(1)
+            });
+          } catch (incErr) {
+            console.warn('Could not increment count directly:', incErr);
           }
         }
-      });
-      
-      const session = await sessionPromise;
-      sessionRef.current = session;
-
-      // Kick off conversation turn so HERA speaks first
-      try {
-        session.sendClientContent({
-          turns: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Hola HERA, soy ${firstName.trim()} ${lastName.trim()} y estoy listo para iniciar mi entrevista de evaluación para el puesto de ${selectedRole}. Por favor salúdame por mi nombre, preséntate brevemente y hazme la primera pregunta.`
-                }
-              ]
-            }
-          ],
-          turnComplete: true
-        });
-      } catch (triggerErr) {
-        console.warn("Could not send initial candidate trigger:", triggerErr);
+      } catch (dbErr) {
+        console.error('Failed to save interview record to Firestore:', dbErr);
       }
-      
-    } catch (err: any) {
-      console.error("Failed to start candidate interview:", err);
-      const isKeyError = err?.message?.includes("clave") || err?.message?.includes("API") || err?.message?.includes("Permission denied");
-      setFormError(
-        isKeyError 
-          ? "El sistema de IA de HERA para esta vacante requiere actualización de credenciales por parte de la empresa reclutadora. Por favor notifícales."
-          : "No se pudo iniciar la llamada de voz con HERA (" + (err?.message || "error de conexión") + "). Por favor verifica los permisos de micrófono y vuelve a intentar."
-      );
-      setStep('form');
+
+      setStep('success');
+    } catch (err) {
+      console.error('Failed to generate candidate report:', err);
+      setStep('success'); // Still show success to candidate so they are not stressed
     }
   };
 
@@ -512,17 +373,13 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
       : 0;
 
     if (durationSeconds < 10) {
-      cleanupAudio();
+      stopCurrentSpeech();
       setFormError(`⚠️ La entrevista duró menos de 10 segundos (${durationSeconds}s). No se ha consumido del cupo de evaluaciones de la empresa.`);
       setStep('form');
       return;
     }
 
-    handleInterviewComplete({
-      candidate_summary: "La entrevista fue terminada anticipadamente por el candidato.",
-      recommended_score: 0,
-      red_flags: 0
-    });
+    handleInterviewComplete(conversationHistory);
   };
 
   return (
@@ -573,7 +430,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
             {onExitToMainApp && (
               <button
                 onClick={onExitToMainApp}
-                className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700 transition-colors"
+                className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700 transition-colors cursor-pointer"
               >
                 Ir a Plataforma Principal
               </button>
@@ -594,7 +451,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
             {onExitToMainApp && (
               <button
                 onClick={onExitToMainApp}
-                className="px-5 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors"
+                className="px-5 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors cursor-pointer"
               >
                 Ir a Inicio
               </button>
@@ -604,7 +461,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
         {/* State: Form Registration */}
         {!loadingCompany && step === 'form' && (
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 md:p-8 w-full">
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 md:p-8 w-full animate-in fade-in">
             <div className="text-center mb-6">
               <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-2 border border-indigo-100">
                 <Sparkles className="w-3.5 h-3.5" />
@@ -676,7 +533,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                 <select
                   value={selectedRole}
                   onChange={(e) => setSelectedRole(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 outline-none focus:border-indigo-500"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 outline-none focus:border-indigo-500 cursor-pointer"
                 >
                   {Object.entries(ROLES_BY_CATEGORY).map(([category, roles]) => (
                     <optgroup key={category} label={category}>
@@ -694,13 +551,13 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
               <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 text-xs space-y-2 text-slate-600">
                 <p className="font-bold text-slate-900 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-indigo-600" />
-                  Instrucciones de la llamada:
+                  Instrucciones de la evaluación:
                 </p>
                 <ul className="list-disc pl-4 space-y-1 text-[11px] text-slate-600">
-                  <li>HERA te hará <strong>3 preguntas técnicas</strong> sobre la vacante.</li>
-                  <li>Debes mantener presionado o hacer clic en <strong>"Empezar a Responder"</strong> para hablar.</li>
-                  <li>Asegúrate de permitir el micrófono en tu navegador.</li>
-                  <li>Al terminar, tus resultados serán enviados directamente a <strong>{companyName}</strong>.</li>
+                  <li>HERA hablará primero y te hará <strong>3 preguntas técnicas</strong> sobre la vacante.</li>
+                  <li>Presiona <strong>"Empezar a Responder"</strong> para hablar y <strong>"Terminar Respuesta"</strong> al concluir cada respuesta.</li>
+                  <li>No requieres instalar nada ni configurar claves. Todo se gestiona de forma directa y transparente.</li>
+                  <li>Al terminar, tus resultados serán enviados de inmediato al equipo de <strong>{companyName}</strong>.</li>
                 </ul>
               </div>
 
@@ -710,7 +567,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
                   id="terms"
                   checked={termsAccepted}
                   onChange={(e) => setTermsAccepted(e.target.checked)}
-                  className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                 />
                 <label htmlFor="terms" className="text-[11px] text-slate-600 select-none cursor-pointer">
                   Confirmo que mis datos son correctos y autorizo la realización de la evaluación por voz con IA.
@@ -719,7 +576,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 mt-4"
+                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 mt-4 cursor-pointer"
               >
                 Comenzar Entrevista de Voz
                 <ArrowRight className="w-4 h-4" />
@@ -730,70 +587,136 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
         {/* State: Voice Interview */}
         {step === 'interview' && (
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 w-full text-center flex flex-col items-center">
-            <div className="mb-8">
-              <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full border border-indigo-100">
-                Puesto: {selectedRole}
-              </span>
-              <h2 className="text-2xl font-bold text-slate-900 mt-2">Entrevista en Curso con HERA</h2>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-                Hola {firstName}, escucha con atención la pregunta y presiona <strong>"Empezar a Responder"</strong> para contestar.
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 md:p-8 w-full text-center flex flex-col items-center animate-in fade-in">
+            {/* Header info */}
+            <div className="mb-6 w-full">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full border border-indigo-100">
+                  {selectedRole}
+                </span>
+                <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full">
+                  Pregunta {Math.min(questionNumber, 3)} de 3
+                </span>
+              </div>
+              <h2 className="text-xl md:text-2xl font-bold text-slate-900">Evaluación de Voz en Curso</h2>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto mt-0.5">
+                Hola {firstName}, responde con claridad y detalle a las preguntas de HERA.
               </p>
             </div>
 
-            <div className="relative flex items-center justify-center w-44 h-44 mb-8">
+            {/* HERA Speech Display */}
+            {heraText && (
+              <div className="w-full bg-linear-to-b from-indigo-50/70 to-slate-50 border border-indigo-100 rounded-2xl p-4 mb-6 text-left relative">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+                    <HeraLogo size="xs" />
+                    <span>HERA Recruiter</span>
+                  </div>
+                  <button
+                    onClick={() => playHeraVoice(heraText)}
+                    disabled={isHeraSpeaking || isAnswering}
+                    className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 bg-white px-2 py-0.5 rounded-lg border border-indigo-100 shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Volume2 className="w-3 h-3" />
+                    Reescuchar
+                  </button>
+                </div>
+                <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                  {heraText}
+                </p>
+              </div>
+            )}
+
+            {/* Microphone Button */}
+            <div className="relative flex items-center justify-center w-40 h-40 mb-6">
               {isAnswering && (
                 <>
-                  <div className="absolute inset-0 rounded-full bg-indigo-100 animate-ping opacity-75" style={{ animationDuration: '3s' }}></div>
-                  <div className="absolute inset-4 rounded-full bg-indigo-200 animate-ping opacity-50" style={{ animationDuration: '2s' }}></div>
+                  <div className="absolute inset-0 rounded-full bg-red-100 animate-ping opacity-75" style={{ animationDuration: '2s' }}></div>
+                  <div className="absolute inset-4 rounded-full bg-red-200 animate-ping opacity-50" style={{ animationDuration: '1.5s' }}></div>
                 </>
+              )}
+              {isHeraSpeaking && (
+                <div className="absolute inset-2 rounded-full bg-indigo-100 animate-pulse"></div>
               )}
               <button
                 onClick={toggleAnswering}
-                disabled={!isRecording}
-                className={`relative z-10 w-32 h-32 rounded-full flex flex-col items-center justify-center shadow-xl transition-all ${
-                  !isRecording 
-                    ? 'bg-slate-200 cursor-not-allowed'
+                disabled={isSubmittingAnswer}
+                className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center shadow-xl transition-all cursor-pointer ${
+                  isSubmittingAnswer
+                    ? 'bg-slate-300 cursor-not-allowed'
                     : isAnswering 
-                      ? 'bg-red-500 hover:bg-red-600 shadow-red-200' 
+                      ? 'bg-red-500 hover:bg-red-600 shadow-red-200 scale-105' 
+                      : isHeraSpeaking
+                      ? 'bg-indigo-500 hover:bg-indigo-600 shadow-indigo-200'
                       : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'
                 }`}
               >
-                {isAnswering ? (
-                  <MicOff className="w-8 h-8 text-white mb-1" />
+                {isSubmittingAnswer ? (
+                  <Loader2 className="w-7 h-7 text-white animate-spin" />
+                ) : isAnswering ? (
+                  <MicOff className="w-7 h-7 text-white mb-1" />
                 ) : (
-                  <Mic className="w-8 h-8 text-white mb-1" />
+                  <Mic className="w-7 h-7 text-white mb-1" />
                 )}
-                <span className="text-white text-[11px] font-bold text-center leading-tight mt-1">
-                  {isAnswering ? <>Terminar<br/>Respuesta</> : <>Empezar a<br/>Responder</>}
+                <span className="text-white text-[10px] font-bold text-center leading-tight mt-0.5">
+                  {isSubmittingAnswer ? 'Procesando...' : isAnswering ? <>Terminar<br/>Respuesta</> : <>Empezar a<br/>Responder</>}
                 </span>
               </button>
             </div>
 
-            <div className="flex items-center gap-2.5 text-slate-600 bg-slate-50 px-5 py-2.5 rounded-full border border-slate-200 mb-8 text-xs">
-              {isRecording ? (
-                isAnswering ? (
-                  <>
-                    <Volume2 className="w-4 h-4 text-red-500 animate-pulse" />
-                    <span className="font-semibold text-red-700">Grabando tu respuesta...</span>
-                  </>
-                ) : (
-                  <>
-                    <HeraLogo size="xs" />
-                    <span className="font-medium">HERA está hablando o procesando...</span>
-                  </>
-                )
+            {/* Status pill */}
+            <div className="flex items-center gap-2 text-slate-600 bg-slate-50 px-4 py-2 rounded-full border border-slate-200 mb-5 text-xs">
+              {isSubmittingAnswer ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
+                  <span className="font-semibold text-indigo-700">HERA está evaluando tu respuesta...</span>
+                </>
+              ) : isAnswering ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-red-500 animate-pulse" />
+                  <span className="font-semibold text-red-700">Grabando tu voz... Habla con naturalidad</span>
+                </>
+              ) : isHeraSpeaking ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-indigo-600 animate-pulse" />
+                  <span className="font-medium text-indigo-700">HERA está hablando...</span>
+                </>
               ) : (
                 <>
-                  <Loader2 className="w-4 h-4 text-slate-400 animate-spin" />
-                  <span className="font-medium">Conectando llamada con HERA...</span>
+                  <Mic className="w-3.5 h-3.5 text-indigo-600" />
+                  <span className="font-medium text-slate-600">Presiona "Empezar a Responder" para hablar</span>
                 </>
+              )}
+            </div>
+
+            {/* Live Candidate Transcript / Input Box */}
+            <div className="w-full text-left mb-6">
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                Tu Respuesta (Transcripción en Vivo):
+              </label>
+              <textarea
+                rows={2}
+                value={candidateResponse}
+                onChange={(e) => setCandidateResponse(e.target.value)}
+                placeholder={isAnswering ? "Escuchando tu voz..." : "El texto de tu respuesta aparecerá aquí al hablar, o puedes escribir si lo prefieres..."}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 outline-none focus:bg-white focus:border-indigo-500 transition-all resize-none"
+              />
+              {!isAnswering && candidateResponse.trim().length > 0 && !isSubmittingAnswer && (
+                <div className="flex justify-end mt-1.5">
+                  <button
+                    onClick={submitCandidateAnswer}
+                    className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Send className="w-3 h-3" />
+                    Enviar Respuesta
+                  </button>
+                </div>
               )}
             </div>
 
             <button
               onClick={endInterviewEarly}
-              className="flex items-center gap-1.5 px-4 py-2 bg-red-50 text-red-600 font-semibold text-xs rounded-xl hover:bg-red-100 transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 bg-red-50 text-red-600 font-semibold text-xs rounded-xl hover:bg-red-100 transition-colors cursor-pointer"
             >
               <Square className="w-3 h-3" />
               Finalizar Entrevista
@@ -803,7 +726,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
         {/* State: Submitting Report */}
         {step === 'submitting' && (
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 w-full text-center flex flex-col items-center">
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 w-full text-center flex flex-col items-center animate-in fade-in">
             <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mb-5 border border-indigo-100">
               <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
             </div>
@@ -816,7 +739,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
 
         {/* State: Success */}
         {step === 'success' && (
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 w-full text-center max-w-md">
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8 w-full text-center max-w-md animate-in fade-in">
             <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4 border border-emerald-200 text-emerald-600 shadow-sm">
               <CheckCircle2 className="w-8 h-8" />
             </div>
@@ -835,7 +758,7 @@ export const CandidatePortal: React.FC<CandidatePortalProps> = ({
             {onExitToMainApp && (
               <button
                 onClick={onExitToMainApp}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-colors"
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Cerrar Portal
               </button>

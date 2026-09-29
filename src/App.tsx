@@ -1,13 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Type, Modality } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import { 
   Mic, MicOff, Square, Briefcase, ChevronRight, CheckCircle2, 
-  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Lock, Sparkles, 
-  ShieldAlert, Mail, RefreshCw, Link2, Users, Building2, Share2, AlertCircle 
+  Loader2, Volume2, User as UserIcon, LogOut, Zap, History, Sparkles, 
+  Mail, RefreshCw, Link2, Users, Building2, AlertCircle, Send
 } from 'lucide-react';
 import { ROLES_BY_CATEGORY } from './roles';
-import { VOICE_SYSTEM_PROMPT } from './systemPrompt';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AuthModal } from './components/AuthModal';
 import { PricingModal } from './components/PricingModal';
@@ -15,18 +13,17 @@ import { InterviewHistory } from './components/InterviewHistory';
 import { CompanyInviteModal } from './components/CompanyInviteModal';
 import { CandidateManagementHub } from './components/CandidateManagementHub';
 import { CandidatePortal } from './components/CandidatePortal';
-import { GeminiKeyModal } from './components/GeminiKeyModal';
 import { HeraLogo } from './components/HeraLogo';
 import { db, isUserSubscriptionActive, getExpiresAtMillis } from './lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, getDoc } from 'firebase/firestore';
 import { 
-  getOrFetchGeminiApiKey, 
-  createGeminiClient, 
-  GEMINI_LIVE_MODEL, 
-  GEMINI_TEXT_MODEL,
-  isKeyValidFormat 
+  startInterviewSession, 
+  sendInterviewResponse, 
+  generateEvaluationReport, 
+  speakHera, 
+  stopCurrentSpeech,
+  InterviewSessionMessage 
 } from './lib/gemini';
-import { Key } from 'lucide-react';
 
 function MainApp() {
   const { user, profile, logout, refreshProfile, sendVerificationEmail, checkEmailVerification } = useAuth();
@@ -50,9 +47,16 @@ function MainApp() {
   const [step, setStep] = useState<'select_role' | 'interview' | 'generating_report' | 'report'>('select_role');
   const [selectedRole, setSelectedRole] = useState<string>('');
   const [reportContent, setReportContent] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [isAnswering, setIsAnswering] = useState(false);
   
+  // Voice & Interview State
+  const [questionNumber, setQuestionNumber] = useState(1);
+  const [heraText, setHeraText] = useState('');
+  const [isHeraSpeaking, setIsHeraSpeaking] = useState(false);
+  const [isAnswering, setIsAnswering] = useState(false);
+  const [candidateResponse, setCandidateResponse] = useState('');
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<InterviewSessionMessage[]>([]);
+
   // Modals
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isPricingOpen, setIsPricingOpen] = useState(false);
@@ -60,8 +64,6 @@ function MainApp() {
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [inviteRoleForModal, setInviteRoleForModal] = useState<string>('SEO Specialist');
   const [isCandidateHubOpen, setIsCandidateHubOpen] = useState(false);
-  const [isGeminiKeyModalOpen, setIsGeminiKeyModalOpen] = useState(false);
-  const [geminiKeyConfigured, setGeminiKeyConfigured] = useState(true);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
   const [emailNotice, setEmailNotice] = useState<string | null>(null);
@@ -69,6 +71,9 @@ function MainApp() {
 
   // Track start time of current interview to filter out tests < 10 seconds
   const interviewStartTimeRef = useRef<number | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const stopAudioFnRef = useRef<(() => void) | null>(null);
+  const isAnsweringRef = useRef(false);
 
   // Check URL parameters when mounted
   useEffect(() => {
@@ -108,7 +113,6 @@ function MainApp() {
             const quotaAdded = planIncrements[activatedPlan] || 20;
             const userRef = doc(db, 'users', user.uid);
             
-            // Read latest profile data to accumulate evaluations accurately
             let currentLimit = 2;
             let currentExpiresMs = 0;
             let currentCount = 0;
@@ -127,10 +131,7 @@ function MainApp() {
               console.warn("Could not fetch userDoc before accumulating:", err);
             }
 
-            // Evaluations are cumulative: new quota adds onto previous total
             const newCumulativeLimit = currentLimit + quotaAdded;
-
-            // Monthly validation: 30 days validity from now (or extends existing active period)
             const now = Date.now();
             const baseMs = currentExpiresMs > now ? currentExpiresMs : now;
             const newExpiresAt = new Date(baseMs + 30 * 24 * 60 * 60 * 1000);
@@ -149,7 +150,6 @@ function MainApp() {
             const remaining = Math.max(0, newCumulativeLimit - currentCount);
             setPaymentNotice(`🎉 ¡Pago mensual verificado con éxito! Tu ${activatedPlan === 'basic' ? 'Plan Básico' : activatedPlan === 'corp' ? 'Plan Corporativo' : 'Plan Pro'} está activo. Se sumaron +${quotaAdded} evaluaciones acumulativas a tu cuenta (Total acumulado: ${remaining} disponibles).`);
             
-            // Clean query parameters cleanly from URL
             window.history.replaceState({}, document.title, window.location.pathname);
           }
         })
@@ -162,14 +162,15 @@ function MainApp() {
     }
   }, [user]);
 
-  // Check if Gemini API key is configured
+  // Clean up audio on unmount
   useEffect(() => {
-    getOrFetchGeminiApiKey(user?.uid).then(key => {
-      setGeminiKeyConfigured(isKeyValidFormat(key));
-    }).catch(() => {
-      setGeminiKeyConfigured(false);
-    });
-  }, [user]);
+    return () => {
+      stopCurrentSpeech();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) {}
+      }
+    };
+  }, []);
 
   // If candidate is visiting via invite link, render candidate portal immediately
   if (candidateInviteUid) {
@@ -184,269 +185,34 @@ function MainApp() {
     );
   }
 
-  const isAnsweringRef = useRef(false);
-  const isCompletingRef = useRef(false);
-  const pendingCompletionArgsRef = useRef<any>(null);
-  const isTurnCompleteRef = useRef(false);
-
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const nextPlayTimeRef = useRef<number>(0);
-  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const sessionRef = useRef<any>(null);
-
-  const toggleAnswering = () => {
-    if (!sessionRef.current) return;
-    
-    if (isAnswering) {
-      setIsAnswering(false);
-      isAnsweringRef.current = false;
-      try {
-        sessionRef.current.sendClientContent({ turnComplete: true });
-      } catch (e) {}
-    } else {
-      stopAudio();
-      setIsAnswering(true);
-      isAnsweringRef.current = true;
-    }
-  };
-
-  const playAudio = (base64Audio: string) => {
-    if (!audioCtxRef.current) return;
-    const ctx = audioCtxRef.current;
-    
+  const playHeraVoice = async (textToSpeak: string) => {
+    setIsHeraSpeaking(true);
     try {
-      const binaryString = atob(base64Audio);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
+      if (stopAudioFnRef.current) {
+        stopAudioFnRef.current();
       }
-      const int16Array = new Int16Array(bytes.buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i++) {
-          float32Array[i] = int16Array[i] / 32768.0;
-      }
-      
-      const audioBuffer = ctx.createBuffer(1, float32Array.length, 24000);
-      audioBuffer.getChannelData(0).set(float32Array);
-      
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      
-      const startTime = Math.max(nextPlayTimeRef.current, ctx.currentTime);
-      source.start(startTime);
-      nextPlayTimeRef.current = startTime + audioBuffer.duration;
-      
-      activeSourcesRef.current.push(source);
-      source.onended = () => {
-        activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
-      };
-    } catch (err) {
-      console.error("Error playing audio chunk:", err);
-    }
-  };
-
-  const stopAudio = () => {
-    activeSourcesRef.current.forEach(s => {
-      try { s.stop(); } catch(e){}
-    });
-    activeSourcesRef.current = [];
-    if (audioCtxRef.current) {
-      nextPlayTimeRef.current = audioCtxRef.current.currentTime;
-    }
-  };
-
-  const cleanupAudio = () => {
-    stopAudio();
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      mediaStreamRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
-    setIsRecording(false);
-  };
-
-  const startRecording = async (sessionPromise: Promise<any>) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } });
-      mediaStreamRef.current = stream;
-      setIsRecording(true);
-      
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-      const source = ctx.createMediaStreamSource(stream);
-      
-      const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.buffer = new Int16Array(4096);
-            this.offset = 0;
-          }
-          process(inputs, outputs, parameters) {
-            const input = inputs[0];
-            if (input && input.length > 0) {
-              const channelData = input[0];
-              for (let i = 0; i < channelData.length; i++) {
-                this.buffer[this.offset++] = Math.max(-1, Math.min(1, channelData[i])) * 32767;
-                if (this.offset >= this.buffer.length) {
-                  this.port.postMessage(this.buffer.buffer.slice(0), [this.buffer.buffer.slice(0)]);
-                  this.offset = 0;
-                  this.buffer = new Int16Array(4096);
-                }
-              }
-            }
-            return true;
-          }
-        }
-        registerProcessor('pcm-processor', PCMProcessor);
-      `;
-      const blob = new Blob([workletCode], { type: 'application/javascript' });
-      const url = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(url);
-      
-      const workletNode = new AudioWorkletNode(ctx, 'pcm-processor');
-      
-      workletNode.port.onmessage = (e) => {
-        if (!isAnsweringRef.current) return;
-        
-        const pcm16 = new Int16Array(e.data);
-        const bytes = new Uint8Array(pcm16.buffer);
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
-        
-        sessionPromise.then(session => {
-          session.sendRealtimeInput({ 
-            audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
-          });
-        }).catch(() => {});
-      };
-      
-      source.connect(workletNode);
-    } catch (err) {
-      console.error("Error accessing microphone:", err);
-      alert("Microphone access is required for the voice interview.");
-      setStep('select_role');
-    }
-  };
-
-  const handleInterviewComplete = async (args: any) => {
-    setStep('generating_report');
-    cleanupAudio();
-
-    const durationSeconds = interviewStartTimeRef.current 
-      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
-      : 0;
-    const isShortInterview = durationSeconds < 10;
-    
-    try {
-      const prompt = `Based on the following interview summary, generate a formal Candidate Evaluation Report in Markdown format.
-      
-      Role: ${selectedRole}
-      Score: ${args?.recommended_score || 'N/A'} / 75
-      Red Flags: ${args?.red_flags || 'None'}
-      
-      Summary:
-      ${args?.candidate_summary || JSON.stringify(args) || 'No summary provided.'}
-      
-      Format the report exactly as follows:
-      # Candidate Evaluation Report
-      **Role Applied:** ${selectedRole}
-      **Experience Level:** [Determine based on summary]
-      **Total Score:** ${args?.recommended_score || 'N/A'} / 75
-      
-      ### Strengths
-      - [List strengths]
-      
-      ### Weaknesses
-      - [List weaknesses]
-      
-      ### Red Flags
-      - ${args?.red_flags || 'None'} detected. [Brief explanation if any]
-      
-      ### Final Recommendation
-      [Proceed to second interview / Consider for junior role / Do not proceed / Reject]
-      `;
-      
-      const apiKey = await getOrFetchGeminiApiKey(user?.uid);
-      if (!apiKey) {
-        throw new Error("No se encontró la clave de API de Gemini.");
-      }
-      const response = await createGeminiClient(apiKey).models.generateContent({
-        model: GEMINI_TEXT_MODEL,
-        contents: prompt
+      const cancelFn = await speakHera(textToSpeak, () => {
+        setIsHeraSpeaking(false);
       });
-      
-      const markdownReport = response.text || "Report completed.";
-      setReportContent(markdownReport);
-      setStep('report');
-
-      // Save to Firestore if user is authenticated
-      if (user) {
-        try {
-          await addDoc(collection(db, 'interviews'), {
-            userId: user.uid,
-            role: selectedRole,
-            report: markdownReport,
-            score: args?.recommended_score || 0,
-            redFlags: args?.red_flags || 0,
-            summary: args?.candidate_summary || '',
-            durationSeconds,
-            isShortInterview,
-            createdAt: serverTimestamp()
-          });
-
-          // Only increment interview count in user document if interview was 10 seconds or longer!
-          if (!isShortInterview) {
-            const userRef = doc(db, 'users', user.uid);
-            await updateDoc(userRef, {
-              interviewsCount: increment(1)
-            });
-
-            // Refresh profile so React state updates immediately
-            await refreshProfile();
-          } else {
-            setPaymentNotice(`ℹ️ La entrevista duró ${durationSeconds} segundos (< 10s). No se ha descontado de tu límite de evaluaciones.`);
-          }
-        } catch (dbErr) {
-          console.error("Failed to save interview record to Firestore:", dbErr);
-        }
-      }
-
-    } catch (err) {
-      console.error("Failed to generate report:", err);
-      setReportContent("Failed to generate report. Please try again.");
-      setStep('report');
+      stopAudioFnRef.current = cancelFn;
+    } catch (e) {
+      console.warn('Voice playback note:', e);
+      setIsHeraSpeaking(false);
     }
   };
 
   const startInterview = async (role: string) => {
-    // Check authentication or trial limits
     if (!user) {
       setIsAuthOpen(true);
       return;
     }
 
-    // Refresh profile from Firestore to ensure we have the absolute latest count and plan status
     await refreshProfile();
 
     const isSubActive = isUserSubscriptionActive(profile);
     const hasPaidPlan = profile?.subscriptionPlan === 'basic' || profile?.subscriptionPlan === 'pro' || profile?.subscriptionPlan === 'corp';
     const isDev = profile?.email?.toLowerCase() === 'rodrigoalto25@gmail.com' || profile?.uid === 'MofrK18CvYXsecnf8a6WynBeJWN2';
 
-    // Validate monthly subscription payment
     if (hasPaidPlan && !isSubActive && !isDev) {
       alert('Tu mensualidad de HERA ha vencido. Por favor renueva tu suscripción para continuar realizando evaluaciones. ¡Tus evaluaciones acumuladas están guardadas!');
       setIsPricingOpen(true);
@@ -464,132 +230,203 @@ function MainApp() {
     setSelectedRole(role);
     setStep('interview');
     interviewStartTimeRef.current = Date.now();
+    setQuestionNumber(1);
+    setConversationHistory([]);
+    setCandidateResponse('');
+
+    try {
+      const candidateDisp = user.displayName || user.email?.split('@')[0] || 'Candidato';
+      const sessionResult = await startInterviewSession({
+        role: role,
+        candidateName: candidateDisp,
+      });
+
+      const initialText = sessionResult.text;
+      setHeraText(initialText);
+      setConversationHistory([
+        { role: 'model', text: initialText }
+      ]);
+
+      await playHeraVoice(initialText);
+    } catch (err: any) {
+      console.error('Failed to start interview:', err);
+      alert('No se pudo conectar con el servicio de voz de HERA (' + (err?.message || 'error de conexión') + '). Por favor reintenta.');
+      setStep('select_role');
+    }
+  };
+
+  const toggleAnswering = () => {
+    if (isAnswering) {
+      stopAnswering();
+    } else {
+      startAnswering();
+    }
+  };
+
+  const startAnswering = () => {
+    stopCurrentSpeech();
+    setIsHeraSpeaking(false);
+    if (stopAudioFnRef.current) {
+      stopAudioFnRef.current();
+    }
+
+    setIsAnswering(true);
+    isAnsweringRef.current = true;
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-ES';
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event: any) => {
+          let interimTranscript = '';
+          let finalTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript + ' ';
+            } else {
+              interimTranscript += event.results[i][0].transcript;
+            }
+          }
+
+          const currentText = (finalTranscript + interimTranscript).trim();
+          if (currentText) {
+            setCandidateResponse(prev => {
+              if (prev && !prev.endsWith(' ') && !currentText.startsWith(prev)) {
+                return `${prev} ${currentText}`;
+              }
+              return currentText;
+            });
+          }
+        };
+
+        recognition.onerror = (err: any) => {
+          console.warn('Speech recognition warning:', err.error);
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      } catch (err) {
+        console.warn('Could not start SpeechRecognition:', err);
+      }
+    }
+  };
+
+  const stopAnswering = async () => {
+    setIsAnswering(false);
+    isAnsweringRef.current = false;
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+
+    await submitCandidateAnswer();
+  };
+
+  const submitCandidateAnswer = async () => {
+    const answer = candidateResponse.trim() || 'Respuesta grabada durante la evaluación.';
+    setIsSubmittingAnswer(true);
+
+    const updatedHistory: InterviewSessionMessage[] = [
+      ...conversationHistory,
+      { role: 'user', text: answer }
+    ];
+    setConversationHistory(updatedHistory);
+    setCandidateResponse('');
+
+    const candidateDisp = user?.displayName || user?.email?.split('@')[0] || 'Candidato';
+
+    try {
+      const responseResult = await sendInterviewResponse({
+        role: selectedRole,
+        candidateName: candidateDisp,
+        history: updatedHistory,
+        userResponse: answer,
+        questionNumber: questionNumber,
+      });
+
+      const nextHeraText = responseResult.text;
+      setHeraText(nextHeraText);
+      const historyWithModel: InterviewSessionMessage[] = [
+        ...updatedHistory,
+        { role: 'model', text: nextHeraText }
+      ];
+      setConversationHistory(historyWithModel);
+      setQuestionNumber(responseResult.questionNumber);
+
+      await playHeraVoice(nextHeraText);
+
+      if (responseResult.isFinished || questionNumber >= 3) {
+        setTimeout(() => {
+          handleInterviewComplete(historyWithModel);
+        }, 3500);
+      }
+    } catch (err: any) {
+      console.error('Error submitting answer:', err);
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  };
+
+  const handleInterviewComplete = async (finalHistory: InterviewSessionMessage[]) => {
+    setStep('generating_report');
+    stopCurrentSpeech();
+
+    const durationSeconds = interviewStartTimeRef.current 
+      ? Math.floor((Date.now() - interviewStartTimeRef.current) / 1000) 
+      : 0;
+    const isShortInterview = durationSeconds < 10;
     
     try {
-      isCompletingRef.current = false;
-      pendingCompletionArgsRef.current = null;
-      isTurnCompleteRef.current = false;
-      
-      const apiKey = await getOrFetchGeminiApiKey(user?.uid);
-      if (!apiKey) {
-        throw new Error("No se encontró la clave de API de Gemini.");
-      }
-
-      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      if (audioCtxRef.current.state === 'suspended') {
-        await audioCtxRef.current.resume();
-      }
-      nextPlayTimeRef.current = audioCtxRef.current.currentTime;
-      
-      const aiClient = createGeminiClient(apiKey);
-      const sessionPromise = aiClient.live.connect({
-        model: GEMINI_LIVE_MODEL,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
-          },
-          systemInstruction: VOICE_SYSTEM_PROMPT + `\n\nThe candidate is applying for: ${role}. Start the interview immediately by introducing yourself briefly as HERA and asking the first interview question.`,
-          tools: [{
-            functionDeclarations: [
-              {
-                name: 'complete_interview',
-                description: 'Call this function ONLY when you have completed all steps of the interview to submit the final evaluation.',
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    candidate_summary: { type: Type.STRING, description: 'Detailed notes on everything the candidate said.' },
-                    recommended_score: { type: Type.INTEGER, description: 'Recommended score out of 75.' },
-                    red_flags: { type: Type.INTEGER, description: 'Number of red flags detected.' }
-                  },
-                  required: ['candidate_summary', 'recommended_score', 'red_flags']
-                }
-              }
-            ]
-          }]
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Main App Live Session Connected!");
-            startRecording(sessionPromise);
-          },
-          onmessage: async (message: any) => {
-            const parts = message.serverContent?.modelTurn?.parts;
-            if (parts) {
-              for (const part of parts) {
-                if (part.inlineData && part.inlineData.data) {
-                  playAudio(part.inlineData.data);
-                }
-              }
-            }
-            if (message.serverContent?.interrupted) {
-              stopAudio();
-            }
-            if (message.serverContent?.turnComplete) {
-              isTurnCompleteRef.current = true;
-            }
-            if (message.toolCall) {
-              const call = message.toolCall.functionCalls?.find((c: any) => c.name === 'complete_interview');
-              if (call) {
-                pendingCompletionArgsRef.current = call.args;
-              }
-            }
-            
-            if (pendingCompletionArgsRef.current && isTurnCompleteRef.current && !isCompletingRef.current) {
-              isCompletingRef.current = true;
-              
-              const checkAudioFinished = () => {
-                const currentTime = audioCtxRef.current?.currentTime || 0;
-                if (currentTime >= nextPlayTimeRef.current) {
-                  handleInterviewComplete(pendingCompletionArgsRef.current);
-                } else {
-                  setTimeout(checkAudioFinished, 500);
-                }
-              };
-              
-              setTimeout(checkAudioFinished, 500);
-            }
-          },
-          onclose: () => {
-            console.log("Session closed");
-          },
-          onerror: (err: any) => {
-            console.error("Live API Error:", err);
-          }
-        }
+      const candidateDisp = user?.displayName || user?.email?.split('@')[0] || 'Candidato';
+      const evalResult = await generateEvaluationReport({
+        role: selectedRole,
+        candidateName: candidateDisp,
+        candidateEmail: user?.email || '',
+        history: finalHistory,
       });
-      
-      const session = await sessionPromise;
-      sessionRef.current = session;
 
-      // Trigger initial conversation prompt so HERA speaks immediately
-      try {
-        session.sendClientContent({
-          turns: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Hola HERA, estoy listo para iniciar la entrevista para la posición de ${role}. Por favor preséntate y comienza con la primera pregunta.`
-                }
-              ]
-            }
-          ],
-          turnComplete: true
-        });
-      } catch (triggerErr) {
-        console.warn("Could not send initial message trigger:", triggerErr);
+      const markdownReport = evalResult.markdownReport || 'Reporte completado.';
+      setReportContent(markdownReport);
+      setStep('report');
+
+      if (user) {
+        try {
+          await addDoc(collection(db, 'interviews'), {
+            userId: user.uid,
+            role: selectedRole,
+            report: markdownReport,
+            score: evalResult.score || 0,
+            redFlags: evalResult.redFlags || 0,
+            summary: evalResult.summary || '',
+            durationSeconds,
+            isShortInterview,
+            createdAt: serverTimestamp()
+          });
+
+          if (!isShortInterview) {
+            const userRef = doc(db, 'users', user.uid);
+            await updateDoc(userRef, {
+              interviewsCount: increment(1)
+            });
+            await refreshProfile();
+          } else {
+            setPaymentNotice(`ℹ️ La entrevista duró ${durationSeconds} segundos (< 10s). No se ha descontado de tu límite de evaluaciones.`);
+          }
+        } catch (dbErr) {
+          console.error('Failed to save interview record to Firestore:', dbErr);
+        }
       }
-      
-    } catch (err: any) {
-      console.error("Failed to start interview:", err);
-      const isKeyError = err?.message?.includes("clave") || err?.message?.includes("API") || err?.message?.includes("Permission denied");
-      if (isKeyError) {
-        setIsGeminiKeyModalOpen(true);
-      } else {
-        alert("No se pudo iniciar la entrevista de voz (" + (err?.message || "error de micrófono/conexión") + "). Por favor verifica los permisos.");
-      }
-      setStep('select_role');
+
+    } catch (err) {
+      console.error('Failed to generate report:', err);
+      setReportContent('No se pudo generar el reporte completo. Por favor intenta de nuevo.');
+      setStep('report');
     }
   };
 
@@ -599,17 +436,13 @@ function MainApp() {
       : 0;
 
     if (durationSeconds < 10) {
-      cleanupAudio();
+      stopCurrentSpeech();
       setPaymentNotice(`⚠️ La entrevista duró menos de 10 segundos (${durationSeconds}s). No se ha descontado de tu límite de evaluaciones.`);
       setStep('select_role');
       return;
     }
 
-    handleInterviewComplete({
-      candidate_summary: "The interview was ended early by the user.",
-      recommended_score: 0,
-      red_flags: 0
-    });
+    handleInterviewComplete(conversationHistory);
   };
 
   const isPro = profile?.subscriptionStatus === 'active';
@@ -627,7 +460,7 @@ function MainApp() {
       {paymentNotice && (
         <div className="bg-emerald-600 text-white text-xs font-semibold py-2.5 px-4 text-center flex items-center justify-center gap-2 relative shadow-sm shrink-0">
           <span>{paymentNotice}</span>
-          <button onClick={() => setPaymentNotice(null)} className="ml-3 underline hover:text-emerald-100 font-bold">
+          <button onClick={() => setPaymentNotice(null)} className="ml-3 underline hover:text-emerald-100 font-bold cursor-pointer">
             Entendido
           </button>
         </div>
@@ -654,7 +487,7 @@ function MainApp() {
                   setEmailNotice('Error al enviar');
                 }
               }}
-              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 rounded-lg text-white font-semibold text-[11px] transition-colors"
+              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 rounded-lg text-white font-semibold text-[11px] transition-colors cursor-pointer"
             >
               Reenviar correo
             </button>
@@ -670,7 +503,7 @@ function MainApp() {
                 }
               }}
               disabled={checkingEmail}
-              className="px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-900 font-bold text-[11px] rounded-lg transition-colors flex items-center gap-1"
+              className="px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-900 font-bold text-[11px] rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
             >
               {checkingEmail && <RefreshCw className="w-3 h-3 animate-spin" />}
               Ya lo verifiqué
@@ -697,24 +530,6 @@ function MainApp() {
         </div>
       )}
 
-      {/* Missing or Inactive Gemini API Key Warning Banner */}
-      {user && !geminiKeyConfigured && (
-        <div className="bg-amber-500 text-white text-xs font-medium py-2.5 px-4 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-xs shrink-0">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>
-              <strong>Atención:</strong> Para que HERA inicie las evaluaciones de voz en todas las categorías y enlaces corporativos, ingresa tu Gemini API Key de Google AI Studio.
-            </span>
-          </div>
-          <button
-            onClick={() => setIsGeminiKeyModalOpen(true)}
-            className="px-3 py-1 bg-white hover:bg-amber-50 text-amber-900 font-bold text-xs rounded-lg transition-colors shrink-0 cursor-pointer"
-          >
-            Configurar Clave Ahora
-          </button>
-        </div>
-      )}
-
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4 flex items-center justify-between sticky top-0 z-20 shrink-0">
         <div className="flex items-center gap-3">
@@ -737,7 +552,7 @@ function MainApp() {
             return (
               <button
                 onClick={() => setIsPricingOpen(true)}
-                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all cursor-pointer ${
                   isExpired
                     ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
                     : isSubActive 
@@ -772,7 +587,7 @@ function MainApp() {
                 <>
                   <button
                     onClick={() => setIsCandidateHubOpen(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                     title="Panel de Candidatos & ATS"
                   >
                     <Users className="w-3.5 h-3.5 text-indigo-400" />
@@ -784,7 +599,7 @@ function MainApp() {
                       setInviteRoleForModal('SEO Specialist');
                       setIsInviteModalOpen(true);
                     }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-semibold transition-colors"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
                     title="Generar Enlace para Candidatos"
                   >
                     <Link2 className="w-3.5 h-3.5" />
@@ -795,23 +610,10 @@ function MainApp() {
 
               <button
                 onClick={() => setIsHistoryOpen(true)}
-                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
                 title="Historial de Entrevistas"
               >
                 <History className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setIsGeminiKeyModalOpen(true)}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-                  geminiKeyConfigured
-                    ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
-                    : 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 shadow-sm animate-pulse'
-                }`}
-                title="Configuración de Clave Gemini API"
-              >
-                <Key className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Gemini API</span>
               </button>
 
               <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
@@ -824,7 +626,7 @@ function MainApp() {
                 </div>
                 <button
                   onClick={logout}
-                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
                   title="Cerrar Sesión"
                 >
                   <LogOut className="w-4 h-4" />
@@ -834,7 +636,7 @@ function MainApp() {
           ) : (
             <button
               onClick={() => setIsAuthOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm transition-all"
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm transition-all cursor-pointer"
             >
               <UserIcon className="w-4 h-4" />
               Iniciar Sesión
@@ -926,7 +728,7 @@ function MainApp() {
                         >
                           <button
                             onClick={() => startInterview(role)}
-                            className="flex-1 text-left flex items-center justify-between"
+                            className="flex-1 text-left flex items-center justify-between cursor-pointer"
                           >
                             <span className="font-semibold text-xs text-slate-800 group-hover:text-indigo-700">{role}</span>
                             <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600 transition-transform group-hover:translate-x-0.5" />
@@ -940,7 +742,7 @@ function MainApp() {
                                 setInviteRoleForModal(role);
                                 setIsInviteModalOpen(true);
                               }}
-                              className="ml-2 p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-100/60 rounded-xl transition-colors shrink-0"
+                              className="ml-2 p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-100/60 rounded-xl transition-colors shrink-0 cursor-pointer"
                               title={`Generar enlace de invitación para ${role}`}
                             >
                               <Link2 className="w-4 h-4" />
@@ -958,68 +760,138 @@ function MainApp() {
 
         {/* Step 2: Voice Interview */}
         {step === 'interview' && (
-          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden max-w-4xl mx-auto w-full p-8">
-            <div className="text-center mb-10">
-              <h2 className="text-2xl font-bold text-slate-900 mb-2">Entrevista de Voz en Curso</h2>
+          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden max-w-4xl mx-auto w-full p-6 md:p-8 animate-in fade-in">
+            {/* Top meta */}
+            <div className="w-full flex items-center justify-between mb-4">
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full border border-indigo-100">
+                Puesto: {selectedRole}
+              </span>
+              <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full">
+                Pregunta {Math.min(questionNumber, 3)} de 3
+              </span>
+            </div>
+
+            <div className="text-center mb-6">
+              <h2 className="text-2xl font-bold text-slate-900 mb-1">Entrevista de Voz con HERA</h2>
               <p className="text-xs text-slate-500 max-w-md mx-auto">
                 Escucha la pregunta de HERA, luego presiona <strong>"Empezar a Responder"</strong> para hablar.
                 Al finalizar, presiona <strong>"Terminar Respuesta"</strong>.
               </p>
             </div>
 
-            <div className="relative flex items-center justify-center w-48 h-48 mb-10">
+            {/* HERA Speech Display */}
+            {heraText && (
+              <div className="w-full bg-linear-to-b from-indigo-50/70 to-slate-50 border border-indigo-100 rounded-2xl p-4 mb-6 text-left">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+                    <HeraLogo size="xs" />
+                    <span>HERA Recruiter</span>
+                  </div>
+                  <button
+                    onClick={() => playHeraVoice(heraText)}
+                    disabled={isHeraSpeaking || isAnswering}
+                    className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-indigo-100 shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Volume2 className="w-3 h-3" />
+                    Reescuchar Pregunta
+                  </button>
+                </div>
+                <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                  {heraText}
+                </p>
+              </div>
+            )}
+
+            {/* Microphone Button */}
+            <div className="relative flex items-center justify-center w-40 h-40 mb-6">
               {isAnswering && (
                 <>
-                  <div className="absolute inset-0 rounded-full bg-indigo-100 animate-ping opacity-75" style={{ animationDuration: '3s' }}></div>
-                  <div className="absolute inset-4 rounded-full bg-indigo-200 animate-ping opacity-50" style={{ animationDuration: '2s' }}></div>
+                  <div className="absolute inset-0 rounded-full bg-red-100 animate-ping opacity-75" style={{ animationDuration: '2s' }}></div>
+                  <div className="absolute inset-4 rounded-full bg-red-200 animate-ping opacity-50" style={{ animationDuration: '1.5s' }}></div>
                 </>
+              )}
+              {isHeraSpeaking && (
+                <div className="absolute inset-2 rounded-full bg-indigo-100 animate-pulse"></div>
               )}
               <button
                 onClick={toggleAnswering}
-                disabled={!isRecording}
-                className={`relative z-10 w-32 h-32 rounded-full flex flex-col items-center justify-center shadow-xl transition-all ${
-                  !isRecording 
-                    ? 'bg-slate-200 cursor-not-allowed'
+                disabled={isSubmittingAnswer}
+                className={`relative z-10 w-28 h-28 rounded-full flex flex-col items-center justify-center shadow-xl transition-all cursor-pointer ${
+                  isSubmittingAnswer
+                    ? 'bg-slate-300 cursor-not-allowed'
                     : isAnswering 
-                      ? 'bg-red-500 hover:bg-red-600 shadow-red-200' 
+                      ? 'bg-red-500 hover:bg-red-600 shadow-red-200 scale-105' 
+                      : isHeraSpeaking
+                      ? 'bg-indigo-500 hover:bg-indigo-600 shadow-indigo-200'
                       : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'
                 }`}
               >
-                {isAnswering ? (
-                  <MicOff className="w-9 h-9 text-white mb-1" />
+                {isSubmittingAnswer ? (
+                  <Loader2 className="w-7 h-7 text-white animate-spin" />
+                ) : isAnswering ? (
+                  <MicOff className="w-7 h-7 text-white mb-1" />
                 ) : (
-                  <Mic className="w-9 h-9 text-white mb-1" />
+                  <Mic className="w-7 h-7 text-white mb-1" />
                 )}
-                <span className="text-white text-xs font-bold text-center leading-tight mt-1">
-                  {isAnswering ? <>Terminar<br/>Respuesta</> : <>Empezar a<br/>Responder</>}
+                <span className="text-white text-[10px] font-bold text-center leading-tight mt-0.5">
+                  {isSubmittingAnswer ? 'Evaluando...' : isAnswering ? <>Terminar<br/>Respuesta</> : <>Empezar a<br/>Responder</>}
                 </span>
               </button>
             </div>
 
-            <div className="flex items-center gap-3 text-slate-600 bg-slate-50 px-6 py-3 rounded-full border border-slate-200 mb-10 text-xs">
-              {isRecording ? (
-                isAnswering ? (
-                  <>
-                    <Volume2 className="w-4 h-4 text-red-500 animate-pulse" />
-                    <span className="font-medium text-red-700">Grabando tu respuesta...</span>
-                  </>
-                ) : (
-                  <>
-                    <HeraLogo size="xs" />
-                    <span className="font-medium">HERA está hablando o procesando...</span>
-                  </>
-                )
+            {/* Status indicator */}
+            <div className="flex items-center gap-2 text-slate-600 bg-slate-50 px-5 py-2 rounded-full border border-slate-200 mb-5 text-xs">
+              {isSubmittingAnswer ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
+                  <span className="font-semibold text-indigo-700">HERA está evaluando tu respuesta...</span>
+                </>
+              ) : isAnswering ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-red-500 animate-pulse" />
+                  <span className="font-semibold text-red-700">Grabando tu respuesta... Habla con claridad</span>
+                </>
+              ) : isHeraSpeaking ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-indigo-600 animate-pulse" />
+                  <span className="font-medium text-indigo-700">HERA está hablando...</span>
+                </>
               ) : (
                 <>
-                  <Loader2 className="w-4 h-4 text-slate-400 animate-spin" />
-                  <span className="font-medium">Conectando con HERA...</span>
+                  <Mic className="w-3.5 h-3.5 text-indigo-600" />
+                  <span className="font-medium">Presiona "Empezar a Responder" para hablar</span>
                 </>
+              )}
+            </div>
+
+            {/* Live Candidate Transcript / Input Box */}
+            <div className="w-full text-left mb-6">
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">
+                Tu Respuesta (Transcripción en Vivo):
+              </label>
+              <textarea
+                rows={2}
+                value={candidateResponse}
+                onChange={(e) => setCandidateResponse(e.target.value)}
+                placeholder={isAnswering ? "Escuchando tu voz..." : "El texto de tu respuesta aparecerá aquí al hablar, o puedes escribir si lo prefieres..."}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 outline-none focus:bg-white focus:border-indigo-500 transition-all resize-none"
+              />
+              {!isAnswering && candidateResponse.trim().length > 0 && !isSubmittingAnswer && (
+                <div className="flex justify-end mt-1.5">
+                  <button
+                    onClick={submitCandidateAnswer}
+                    className="px-3.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Send className="w-3 h-3" />
+                    Enviar Respuesta
+                  </button>
+                </div>
               )}
             </div>
 
             <button
               onClick={endInterviewEarly}
-              className="flex items-center gap-2 px-5 py-2.5 bg-red-50 text-red-600 font-semibold text-xs rounded-xl hover:bg-red-100 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 font-semibold text-xs rounded-xl hover:bg-red-100 transition-colors cursor-pointer"
             >
               <Square className="w-3.5 h-3.5" />
               Finalizar Entrevista
@@ -1029,7 +901,7 @@ function MainApp() {
 
         {/* Step 3: Generating Report */}
         {step === 'generating_report' && (
-          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 max-w-4xl mx-auto w-full p-8">
+          <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-3xl shadow-sm border border-slate-200 max-w-4xl mx-auto w-full p-8 animate-in fade-in">
             <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mb-6 border border-indigo-100 shadow-inner">
               <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
             </div>
@@ -1042,7 +914,7 @@ function MainApp() {
 
         {/* Step 4: Report View */}
         {step === 'report' && (
-          <div className="flex-1 flex flex-col items-center justify-center py-6 w-full overflow-y-auto">
+          <div className="flex-1 flex flex-col items-center justify-center py-6 w-full overflow-y-auto animate-in fade-in">
             <div className="bg-white rounded-3xl shadow-sm border border-slate-200 w-full max-w-3xl overflow-hidden">
               <div className="bg-indigo-600 px-6 py-8 text-white text-center">
                 <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -1064,14 +936,14 @@ function MainApp() {
                       setReportContent(null);
                       setSelectedRole('');
                     }}
-                    className="px-6 py-2.5 bg-slate-900 text-white font-medium text-xs rounded-xl hover:bg-slate-800 transition-colors shadow-sm"
+                    className="px-6 py-2.5 bg-slate-900 text-white font-medium text-xs rounded-xl hover:bg-slate-800 transition-colors shadow-sm cursor-pointer"
                   >
                     Evaluar Otro Puesto
                   </button>
                   {user && (
                     <button
                       onClick={() => setIsHistoryOpen(true)}
-                      className="px-6 py-2.5 bg-slate-100 text-slate-700 font-medium text-xs rounded-xl hover:bg-slate-200 transition-colors"
+                      className="px-6 py-2.5 bg-slate-100 text-slate-700 font-medium text-xs rounded-xl hover:bg-slate-200 transition-colors cursor-pointer"
                     >
                       Ver Historial
                     </button>
@@ -1098,14 +970,6 @@ function MainApp() {
         onOpenInviteModal={() => {
           setIsCandidateHubOpen(false);
           setIsInviteModalOpen(true);
-        }}
-      />
-      <GeminiKeyModal
-        isOpen={isGeminiKeyModalOpen}
-        onClose={() => setIsGeminiKeyModalOpen(false)}
-        onKeySaved={() => {
-          setGeminiKeyConfigured(true);
-          refreshProfile();
         }}
       />
     </div>
